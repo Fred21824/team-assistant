@@ -12,7 +12,11 @@
       "Bash(nc -zv:*)",
       "Bash(make run:*)",
       "Bash(go mod tidy:*)",
-      "Bash(go vet:*)"
+      "Bash(go vet:*)",
+      "Bash(go get:*)",
+      "Bash(cloudflared:*)",
+      "Bash(brew install:*)",
+      "Bash(curl:*)"
     ]
   }
 }

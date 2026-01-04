@@ -131,6 +131,9 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		c.Dify.DatasetID,
 	)
 
+	// 初始化永久记忆管理器
+	aiService.InitMemoryManager(db, rdb)
+
 	return &ServiceContext{
 		Config: c,
 

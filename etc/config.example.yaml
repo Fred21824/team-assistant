@@ -1,0 +1,62 @@
+# Team Assistant 配置文件示例
+# 复制此文件为 config.yaml 并填入实际配置
+
+Server:
+  Port: 8090
+  Mode: debug
+
+# 数据库配置
+MySQL:
+  Host: "127.0.0.1:3306"
+  User: "root"
+  Password: "your_password"
+  Database: "team_assistant"
+
+# Redis 配置
+Redis:
+  Host: "127.0.0.1:6379"
+  Password: ""
+  DB: 0
+
+# 飞书配置
+Lark:
+  # 国际版用 larksuite.com，国内版用 feishu.cn
+  Domain: "https://open.feishu.cn"
+  AppID: "your_app_id"
+  AppSecret: "your_app_secret"
+  # 事件订阅的验证 Token（在飞书开放平台配置后填入）
+  VerificationToken: ""
+  # 事件加密 Key（可选，开启加密后填入）
+  EncryptKey: ""
+  # 机器人的 open_id（用于判断是否@机器人，启动后通过API获取）
+  BotOpenID: ""
+
+# GitHub 配置
+GitHub:
+  # Personal Access Token
+  Token: "ghp_your_github_token"
+  # Webhook Secret（可选，用于验证 GitHub 推送）
+  WebhookSecret: ""
+  # 监控的组织/用户
+  Organizations:
+    - "your-org"
+
+# LLM 配置
+LLM:
+  # 使用 Groq（免费快速）
+  Provider: "groq"
+  APIKey: "gsk_your_groq_api_key"
+  Endpoint: "https://api.groq.com/openai/v1/chat/completions"
+  Model: "llama-3.3-70b-versatile"
+  # 备用: OpenAI
+  # Provider: "openai"
+  # Endpoint: "https://api.openai.com/v1/chat/completions"
+  # APIKey: "sk-your-openai-key"
+  # Model: "gpt-4o-mini"
+
+# Dify 配置（可选，启用后使用 Dify 处理对话）
+Dify:
+  Enabled: false
+  BaseURL: "http://localhost/v1"
+  APIKey: ""
+  DatasetID: ""

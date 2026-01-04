@@ -1,0 +1,171 @@
+# Dify 部署配置
+# 使用方法: docker compose up -d
+
+version: '3.8'
+
+services:
+  # Dify API 服务
+  dify-api:
+    image: langgenius/dify-api:latest
+    container_name: dify-api
+    restart: unless-stopped
+    environment:
+      # 基础配置
+      MODE: api
+      LOG_LEVEL: INFO
+      SECRET_KEY: ${DIFY_SECRET_KEY:-sk-9f73s3ljTXVcMT3Blb3ljTqtsKiGHXVcMT3BlbkFJLK7U}
+
+      # 数据库配置 - 使用 PostgreSQL
+      DB_USERNAME: postgres
+      DB_PASSWORD: difyai123456
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: dify
+
+      # Redis 配置
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: difyai123456
+
+      # 存储配置
+      STORAGE_TYPE: local
+      STORAGE_LOCAL_PATH: /app/api/storage
+
+      # 向量数据库配置
+      VECTOR_STORE: weaviate
+      WEAVIATE_ENDPOINT: http://weaviate:8080
+
+      # Celery 配置
+      CELERY_BROKER_URL: redis://:difyai123456@redis:6379/1
+
+    volumes:
+      - dify-storage:/app/api/storage
+    depends_on:
+      - postgres
+      - redis
+      - weaviate
+    networks:
+      - dify-network
+
+  # Dify Worker 服务
+  dify-worker:
+    image: langgenius/dify-api:latest
+    container_name: dify-worker
+    restart: unless-stopped
+    environment:
+      MODE: worker
+      LOG_LEVEL: INFO
+      SECRET_KEY: ${DIFY_SECRET_KEY:-sk-9f73s3ljTXVcMT3Blb3ljTqtsKiGHXVcMT3BlbkFJLK7U}
+      DB_USERNAME: postgres
+      DB_PASSWORD: difyai123456
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_DATABASE: dify
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: difyai123456
+      STORAGE_TYPE: local
+      STORAGE_LOCAL_PATH: /app/api/storage
+      VECTOR_STORE: weaviate
+      WEAVIATE_ENDPOINT: http://weaviate:8080
+      CELERY_BROKER_URL: redis://:difyai123456@redis:6379/1
+    volumes:
+      - dify-storage:/app/api/storage
+    depends_on:
+      - postgres
+      - redis
+      - weaviate
+    networks:
+      - dify-network
+
+  # Dify Web 前端
+  dify-web:
+    image: langgenius/dify-web:latest
+    container_name: dify-web
+    restart: unless-stopped
+    environment:
+      CONSOLE_API_URL: http://dify-api:5001
+      APP_API_URL: http://dify-api:5001
+    ports:
+      - "3000:3000"
+    depends_on:
+      - dify-api
+    networks:
+      - dify-network
+
+  # Nginx 反向代理
+  nginx:
+    image: nginx:alpine
+    container_name: dify-nginx
+    restart: unless-stopped
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    depends_on:
+      - dify-api
+      - dify-web
+    networks:
+      - dify-network
+
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: dify-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: difyai123456
+      POSTGRES_DB: dify
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - dify-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dify-network
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: dify-redis
+    restart: unless-stopped
+    command: redis-server --requirepass difyai123456
+    volumes:
+      - dify-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "difyai123456", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - dify-network
+
+  # Weaviate 向量数据库
+  weaviate:
+    image: semitechnologies/weaviate:1.24.1
+    container_name: dify-weaviate
+    restart: unless-stopped
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: 'true'
+      PERSISTENCE_DATA_PATH: '/var/lib/weaviate'
+      DEFAULT_VECTORIZER_MODULE: 'none'
+      CLUSTER_HOSTNAME: 'node1'
+    volumes:
+      - dify-weaviate-data:/var/lib/weaviate
+    networks:
+      - dify-network
+
+volumes:
+  dify-storage:
+  dify-postgres-data:
+  dify-redis-data:
+  dify-weaviate-data:
+
+networks:
+  dify-network:
+    driver: bridge

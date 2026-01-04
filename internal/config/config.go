@@ -23,6 +23,7 @@ type MySQLConfig struct {
 	User     string `yaml:"User"`
 	Password string `yaml:"Password"`
 	Database string `yaml:"Database"`
+	SkipSSL  bool   `yaml:"SkipSSL"` // 跳过 SSL 验证
 }
 
 // RedisConfig Redis配置

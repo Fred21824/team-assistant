@@ -5,7 +5,14 @@
       "Bash(cat:*)",
       "Bash(git init:*)",
       "Bash(git remote add:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(go build:*)",
+      "Bash(nc -zv:*)",
+      "Bash(make run:*)",
+      "Bash(go mod tidy:*)",
+      "Bash(go vet:*)"
     ]
   }
 }

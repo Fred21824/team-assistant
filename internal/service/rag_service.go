@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strings"
@@ -10,6 +12,13 @@ import (
 	"team-assistant/pkg/embedding"
 	"team-assistant/pkg/vectordb"
 )
+
+// messageIDToUUID 将消息ID转换为UUID格式
+func messageIDToUUID(messageID string) string {
+	hash := md5.Sum([]byte(messageID))
+	hexStr := hex.EncodeToString(hash[:])
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hexStr[0:8], hexStr[8:12], hexStr[12:16], hexStr[16:20], hexStr[20:32])
+}
 
 // RAGService RAG 服务（检索增强生成）
 type RAGService struct {
@@ -96,7 +105,7 @@ func (s *RAGService) IndexMessage(ctx context.Context, msg MessageVector) error 
 
 	// 存入向量数据库
 	point := vectordb.Point{
-		ID:     msg.MessageID,
+		ID:     messageIDToUUID(msg.MessageID),
 		Vector: vector,
 		Payload: map[string]interface{}{
 			"message_id":  msg.MessageID,
@@ -138,7 +147,7 @@ func (s *RAGService) IndexMessages(ctx context.Context, messages []MessageVector
 		}
 
 		points = append(points, vectordb.Point{
-			ID:     msg.MessageID,
+			ID:     messageIDToUUID(msg.MessageID),
 			Vector: vector,
 			Payload: map[string]interface{}{
 				"message_id":  msg.MessageID,

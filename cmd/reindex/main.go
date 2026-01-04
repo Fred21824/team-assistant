@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
 	"database/sql"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -18,6 +20,14 @@ import (
 	"team-assistant/pkg/embedding"
 	"team-assistant/pkg/vectordb"
 )
+
+// messageIDToUUID 将消息ID转换为UUID格式
+func messageIDToUUID(messageID string) string {
+	hash := md5.Sum([]byte(messageID))
+	hex := hex.EncodeToString(hash[:])
+	// 格式化为 UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+	return fmt.Sprintf("%s-%s-%s-%s-%s", hex[0:8], hex[8:12], hex[12:16], hex[16:20], hex[20:32])
+}
 
 func main() {
 	// 命令行参数
@@ -143,7 +153,7 @@ func main() {
 				}
 
 				point := vectordb.Point{
-					ID:     msg.MessageID,
+					ID:     messageIDToUUID(msg.MessageID),
 					Vector: vec,
 					Payload: map[string]interface{}{
 						"message_id":  msg.MessageID,

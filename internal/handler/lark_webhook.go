@@ -320,8 +320,12 @@ func (h *LarkWebhookHandler) handleAIQuery(ctx context.Context, messageID, userI
 		return
 	}
 
+	log.Printf("AI response generated, length: %d chars", len(response))
+
 	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", response); err != nil {
 		log.Printf("Failed to reply AI response: %v", err)
+	} else {
+		log.Printf("Reply sent successfully to message: %s", messageID)
 	}
 }
 

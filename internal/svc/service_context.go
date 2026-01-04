@@ -56,6 +56,7 @@ type Services struct {
 	Chat    *service.ChatService
 	Sync    *service.SyncService
 	AI      *service.AIService
+	RAG     *service.RAGService
 }
 
 // NewServiceContext 创建服务上下文
@@ -134,6 +135,15 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 	// 初始化永久记忆管理器
 	aiService.InitMemoryManager(db, rdb)
 
+	// 初始化 RAG 服务
+	ragService := service.NewRAGService(
+		c.VectorDB.QdrantEndpoint,
+		c.VectorDB.OllamaEndpoint,
+		c.VectorDB.EmbeddingModel,
+		c.VectorDB.CollectionName,
+		c.VectorDB.Enabled,
+	)
+
 	return &ServiceContext{
 		Config: c,
 
@@ -164,6 +174,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			Chat:    chatService,
 			Sync:    syncService,
 			AI:      aiService,
+			RAG:     ragService,
 		},
 	}, nil
 }

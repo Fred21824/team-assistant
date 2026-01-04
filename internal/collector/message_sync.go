@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"team-assistant/internal/model"
+	"team-assistant/internal/service"
 	"team-assistant/internal/svc"
 	"team-assistant/pkg/lark"
 )
@@ -141,7 +142,13 @@ func (s *MessageSyncer) syncMessages(ctx context.Context, task *model.MessageSyn
 		return err
 	}
 
-	// 存储消息
+	// 存储消息并索引到向量数据库
+	var vectorMsgs []service.MessageVector
+	chatName := ""
+	if task.ChatName.Valid {
+		chatName = task.ChatName.String
+	}
+
 	for _, item := range resp.Data.Items {
 		if item.Deleted {
 			continue
@@ -152,6 +159,26 @@ func (s *MessageSyncer) syncMessages(ctx context.Context, task *model.MessageSyn
 			log.Printf("Failed to insert message %s: %v", item.MessageID, err)
 		} else {
 			totalSynced++
+
+			// 收集向量数据
+			if msg.Content.Valid && msg.Content.String != "" {
+				vectorMsgs = append(vectorMsgs, service.MessageVector{
+					MessageID:  msg.MessageID,
+					ChatID:     msg.ChatID,
+					ChatName:   chatName,
+					SenderID:   msg.SenderID.String,
+					SenderName: msg.SenderName.String,
+					Content:    msg.Content.String,
+					CreatedAt:  msg.CreatedAt,
+				})
+			}
+		}
+	}
+
+	// 批量索引到向量数据库
+	if len(vectorMsgs) > 0 && s.svcCtx.Services.RAG != nil && s.svcCtx.Services.RAG.IsEnabled() {
+		if err := s.svcCtx.Services.RAG.IndexMessages(ctx, vectorMsgs); err != nil {
+			log.Printf("Failed to index messages to vector DB: %v", err)
 		}
 	}
 

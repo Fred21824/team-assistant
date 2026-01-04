@@ -2,13 +2,14 @@ package config
 
 // Config 应用配置
 type Config struct {
-	Server ServerConfig `yaml:"Server"`
-	MySQL  MySQLConfig  `yaml:"MySQL"`
-	Redis  RedisConfig  `yaml:"Redis"`
-	Lark   LarkConfig   `yaml:"Lark"`
-	GitHub GitHubConfig `yaml:"GitHub"`
-	LLM    LLMConfig    `yaml:"LLM"`
-	Dify   DifyConfig   `yaml:"Dify"`
+	Server   ServerConfig   `yaml:"Server"`
+	MySQL    MySQLConfig    `yaml:"MySQL"`
+	Redis    RedisConfig    `yaml:"Redis"`
+	Lark     LarkConfig     `yaml:"Lark"`
+	GitHub   GitHubConfig   `yaml:"GitHub"`
+	LLM      LLMConfig      `yaml:"LLM"`
+	Dify     DifyConfig     `yaml:"Dify"`
+	VectorDB VectorDBConfig `yaml:"VectorDB"`
 }
 
 // ServerConfig 服务器配置
@@ -64,4 +65,13 @@ type DifyConfig struct {
 	BaseURL   string `yaml:"BaseURL"`   // Dify API 地址，如 http://localhost/v1
 	APIKey    string `yaml:"APIKey"`    // Dify 应用 API Key
 	DatasetID string `yaml:"DatasetID"` // 知识库 ID（可选）
+}
+
+// VectorDBConfig 向量数据库配置
+type VectorDBConfig struct {
+	Enabled          bool   `yaml:"Enabled"`          // 是否启用向量搜索
+	QdrantEndpoint   string `yaml:"QdrantEndpoint"`   // Qdrant 地址，如 http://localhost:6333
+	OllamaEndpoint   string `yaml:"OllamaEndpoint"`   // Ollama 地址，如 http://localhost:11434
+	EmbeddingModel   string `yaml:"EmbeddingModel"`   // Embedding 模型，默认 nomic-embed-text
+	CollectionName   string `yaml:"CollectionName"`   // 集合名称，默认 messages
 }

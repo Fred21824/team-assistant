@@ -140,8 +140,8 @@ func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, query strin
 		return "抱歉，我无法理解您的问题，请换个方式提问。", nil
 	}
 
-	log.Printf("Parsed query: intent=%s, time_range=%s, users=%v",
-		parsed.Intent, parsed.TimeRange, parsed.TargetUsers)
+	log.Printf("Parsed query: intent=%s, time_range=%s, users=%v, group=%s",
+		parsed.Intent, parsed.TimeRange, parsed.TargetUsers, parsed.TargetGroup)
 
 	// 根据意图处理
 	switch parsed.Intent {
@@ -253,8 +253,63 @@ func (hp *HybridProcessor) formatWorkloadStats(stats []*model.CommitStats, start
 	return sb.String()
 }
 
-// handleMessageSearch 处理消息搜索
+// handleMessageSearch 处理消息搜索（支持语义搜索）
 func (hp *HybridProcessor) handleMessageSearch(ctx context.Context, parsed *llm.ParsedQuery) (string, error) {
+	// 优先使用 RAG 语义搜索
+	if hp.svcCtx.Services.RAG != nil && hp.svcCtx.Services.RAG.IsEnabled() {
+		return hp.handleSemanticSearch(ctx, parsed)
+	}
+
+	// 降级到传统关键词搜索
+	return hp.handleKeywordSearch(ctx, parsed)
+}
+
+// handleSemanticSearch 语义搜索（RAG）
+func (hp *HybridProcessor) handleSemanticSearch(ctx context.Context, parsed *llm.ParsedQuery) (string, error) {
+	// 构建搜索查询
+	query := parsed.RawQuery
+	if len(parsed.Keywords) > 0 {
+		query = strings.Join(parsed.Keywords, " ")
+	}
+
+	// 确定搜索范围
+	var chatID string
+	if parsed.TargetGroup != "" {
+		chatID, _ = hp.findChatByName(ctx, parsed.TargetGroup)
+	}
+
+	// 执行语义搜索
+	results, err := hp.svcCtx.Services.RAG.Search(ctx, query, 15, chatID)
+	if err != nil {
+		log.Printf("Semantic search failed: %v, falling back to keyword search", err)
+		return hp.handleKeywordSearch(ctx, parsed)
+	}
+
+	if len(results) == 0 {
+		return "没有找到相关的消息。", nil
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("🔍 语义搜索找到 %d 条相关消息:\n\n", len(results)))
+
+	for i, r := range results {
+		if i >= 10 {
+			sb.WriteString(fmt.Sprintf("...(还有 %d 条消息)\n", len(results)-10))
+			break
+		}
+		sb.WriteString(fmt.Sprintf("[%s] %s 在「%s」:\n%s\n(相关度: %.0f%%)\n\n",
+			r.CreatedAt.Format("01-02 15:04"),
+			r.SenderName,
+			r.ChatName,
+			truncateString(r.Content, 150),
+			r.Score*100))
+	}
+
+	return sb.String(), nil
+}
+
+// handleKeywordSearch 传统关键词搜索
+func (hp *HybridProcessor) handleKeywordSearch(ctx context.Context, parsed *llm.ParsedQuery) (string, error) {
 	var messages []*model.ChatMessage
 	var err error
 
@@ -310,12 +365,36 @@ func (hp *HybridProcessor) handleMessageSearch(ctx context.Context, parsed *llm.
 func (hp *HybridProcessor) handleSummarize(ctx context.Context, parsed *llm.ParsedQuery) (string, error) {
 	startTime, endTime := hp.getTimeRange(parsed.TimeRange)
 
-	messages, err := hp.svcCtx.MessageModel.GetMessagesByDateRange(ctx, "", startTime, endTime, 100)
+	// 如果指定了群名，先查找对应的 chat_id
+	var chatID string
+	var groupName string
+	if parsed.TargetGroup != "" {
+		log.Printf("Looking for group: %s", parsed.TargetGroup)
+		chatID, groupName = hp.findChatByName(ctx, parsed.TargetGroup)
+		if chatID == "" {
+			// 列出可用的群
+			availableGroups := hp.listAvailableGroups(ctx)
+			return fmt.Sprintf("❌ 未找到群「%s」\n\n可用的群：\n%s\n\n💡 请使用准确的群名，或发送「列出群聊」查看所有群。",
+				parsed.TargetGroup, availableGroups), nil
+		}
+		log.Printf("Found group: %s (chat_id: %s)", groupName, chatID)
+	}
+
+	log.Printf("Summarizing messages from %s to %s, chatID: %s", startTime.Format("2006-01-02 15:04"), endTime.Format("2006-01-02 15:04"), chatID)
+
+	messages, err := hp.svcCtx.MessageModel.GetMessagesByDateRange(ctx, chatID, startTime, endTime, 100)
 	if err != nil {
+		log.Printf("Failed to get messages: %v", err)
 		return "获取消息失败，请稍后重试。", err
 	}
 
+	log.Printf("Found %d messages to summarize", len(messages))
+
 	if len(messages) == 0 {
+		if groupName != "" {
+			return fmt.Sprintf("在「%s」群中没有找到 %s 至 %s 期间的消息。",
+				groupName, startTime.Format("01-02"), endTime.Format("01-02")), nil
+		}
 		return "没有找到需要总结的消息。", nil
 	}
 
@@ -335,15 +414,129 @@ func (hp *HybridProcessor) handleSummarize(ctx context.Context, parsed *llm.Pars
 			content))
 	}
 
+	log.Printf("Calling LLM to summarize %d messages", len(msgTexts))
 	summary, err := hp.llmClient.SummarizeMessages(ctx, msgTexts)
 	if err != nil {
+		log.Printf("LLM summarize error: %v", err)
 		return "总结消息失败，请稍后重试。", err
 	}
+	log.Printf("LLM summary generated successfully")
 
-	return fmt.Sprintf("📋 消息总结 (%s ~ %s)\n\n%s",
+	title := "消息总结"
+	if groupName != "" {
+		title = fmt.Sprintf("「%s」消息总结", groupName)
+	}
+
+	return fmt.Sprintf("📋 %s (%s ~ %s)\n\n%s",
+		title,
 		startTime.Format("01-02 15:04"),
 		endTime.Format("01-02 15:04"),
 		summary), nil
+}
+
+// findChatByName 根据群名查找 chat_id（使用 LLM 智能匹配）
+func (hp *HybridProcessor) findChatByName(ctx context.Context, groupName string) (chatID, name string) {
+	// 先从飞书 API 获取群列表
+	chats, err := hp.svcCtx.LarkClient.GetChats(ctx)
+	if err != nil {
+		log.Printf("Failed to get chats from Lark: %v", err)
+		// 尝试从数据库查找
+		groups, dbErr := hp.svcCtx.GroupModel.ListAll(ctx)
+		if dbErr != nil {
+			log.Printf("Failed to get groups from DB: %v", dbErr)
+			return "", ""
+		}
+		// 简单字符串匹配
+		for _, g := range groups {
+			if g.ChatName.Valid && strings.Contains(g.ChatName.String, groupName) {
+				return g.ChatID, g.ChatName.String
+			}
+		}
+		return "", ""
+	}
+
+	// 第一轮：精确包含匹配
+	for _, chat := range chats {
+		if strings.Contains(chat.Name, groupName) {
+			return chat.ChatID, chat.Name
+		}
+	}
+
+	// 第二轮：使用 LLM 智能匹配
+	if hp.llmClient != nil && len(chats) > 0 {
+		var chatNames []string
+		chatMap := make(map[string]string) // name -> chatID
+		for _, chat := range chats {
+			chatNames = append(chatNames, chat.Name)
+			chatMap[chat.Name] = chat.ChatID
+		}
+
+		matchedName := hp.matchGroupWithLLM(ctx, groupName, chatNames)
+		if matchedName != "" {
+			log.Printf("LLM matched group: '%s' -> '%s'", groupName, matchedName)
+			return chatMap[matchedName], matchedName
+		}
+	}
+
+	return "", ""
+}
+
+// matchGroupWithLLM 使用 LLM 智能匹配群名
+func (hp *HybridProcessor) matchGroupWithLLM(ctx context.Context, userQuery string, availableGroups []string) string {
+	if hp.llmClient == nil || len(availableGroups) == 0 {
+		return ""
+	}
+
+	prompt := fmt.Sprintf(`用户想要查找的群: "%s"
+
+可用的群列表:
+%s
+
+请判断用户想要的是哪个群？如果找到匹配的，只返回群的完整名称（必须与列表中完全一致）。如果没有匹配的，返回空字符串。
+
+注意：
+- "印尼群" 可能匹配 "印度尼西亚_研发沟通群"
+- "研发群" 可能匹配 "研发沟通群" 或包含"研发"的群
+- 进行语义理解，不只是简单的字符串匹配
+
+只返回群名，不要其他内容:`, userQuery, strings.Join(availableGroups, "\n"))
+
+	resp, err := hp.llmClient.GenerateResponse(ctx, prompt, nil)
+	if err != nil {
+		log.Printf("LLM group match failed: %v", err)
+		return ""
+	}
+
+	// 清理响应
+	resp = strings.TrimSpace(resp)
+	resp = strings.Trim(resp, "\"'")
+
+	// 验证返回的群名是否在列表中
+	for _, g := range availableGroups {
+		if resp == g {
+			return resp
+		}
+	}
+
+	return ""
+}
+
+// listAvailableGroups 列出可用的群
+func (hp *HybridProcessor) listAvailableGroups(ctx context.Context) string {
+	chats, err := hp.svcCtx.LarkClient.GetChats(ctx)
+	if err != nil {
+		return "（无法获取群列表）"
+	}
+
+	if len(chats) == 0 {
+		return "（机器人未加入任何群）"
+	}
+
+	var names []string
+	for _, chat := range chats {
+		names = append(names, "• "+chat.Name)
+	}
+	return strings.Join(names, "\n")
 }
 
 // getTimeRange 获取时间范围

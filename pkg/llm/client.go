@@ -42,6 +42,7 @@ type ParsedQuery struct {
 	Intent      Intent            `json:"intent"`
 	TimeRange   TimeRange         `json:"time_range"`
 	TargetUsers []string          `json:"target_users"` // 目标用户名
+	TargetGroup string            `json:"target_group"` // 目标群名（如：印尼群、研发群）
 	Keywords    []string          `json:"keywords"`     // 关键词
 	Repository  string            `json:"repository"`   // 仓库名
 	Params      map[string]string `json:"params"`       // 其他参数
@@ -102,7 +103,7 @@ func (c *Client) ParseUserQuery(ctx context.Context, query string) (*ParsedQuery
 - query_workload: 查询工作量（如：小明这周干了多少活？）
 - query_commits: 查询代码提交（如：今天谁提交了代码？）
 - search_message: 搜索聊天消息（如：张三说过什么关于登录的问题？）
-- summarize: 总结内容（如：总结一下今天群里的讨论）
+- summarize: 总结内容（如：总结一下今天群里的讨论、总结印尼群的消息）
 - query_requirement: 查询需求进度（如：用户登录功能做到哪了？）
 - help: 帮助信息
 - unknown: 无法识别
@@ -114,13 +115,16 @@ func (c *Client) ParseUserQuery(ctx context.Context, query string) (*ParsedQuery
 - last_week: 上周
 - this_month: 本月
 - last_month: 上个月
-- custom: 自定义时间
+- custom: 自定义时间（默认最近7天）
+
+重要：如果用户提到了某个群的名称（如"印尼群"、"研发群"、"测试群"等），请提取到 target_group 字段。
 
 请严格返回以下JSON格式（不要包含其他内容）：
 {
   "intent": "意图类型",
   "time_range": "时间范围",
   "target_users": ["用户名列表"],
+  "target_group": "群名（如：印尼群、研发群，没有则为空字符串）",
   "keywords": ["关键词列表"],
   "repository": "仓库名（如有）",
   "params": {}

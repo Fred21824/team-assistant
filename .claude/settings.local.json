@@ -16,7 +16,22 @@
       "Bash(go get:*)",
       "Bash(cloudflared:*)",
       "Bash(brew install:*)",
-      "Bash(curl:*)"
+      "Bash(curl:*)",
+      "Bash(chmod:*)",
+      "Bash(pkill:*)",
+      "Bash(./scripts/tunnel.sh:*)",
+      "Bash(SSH_KEY=\"/Users/xxxxxx/Work/BSI/bsicryptopay/deploy-key.pem\")",
+      "Bash(ssh:*)",
+      "Bash(timeout 5 go run:*)",
+      "Bash(timeout 10 go run:*)",
+      "Bash(mysql:*)",
+      "Bash(./bin/reindex:*)",
+      "Bash(time curl -s http://18.166.182.134:11434/api/embeddings -d '{\"\"model\"\":\"\"nomic-embed-text\"\",\"\"prompt\"\":\"\"测试消息\"\"}')",
+      "Bash(ollama list:*)",
+      "Bash(ollama pull:*)",
+      "Bash(tar:*)",
+      "Bash(wc:*)",
+      "Bash(sudo -S brew install:*)"
     ]
   }
 }

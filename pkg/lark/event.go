@@ -73,16 +73,26 @@ func ParseMessageContent(msgType, content string) string {
 		if err := json.Unmarshal([]byte(content), &textContent); err == nil {
 			return textContent.Text
 		}
+	case "image":
+		var imageContent struct {
+			ImageKey string `json:"image_key"`
+		}
+		if err := json.Unmarshal([]byte(content), &imageContent); err == nil {
+			// 返回特殊格式，标识这是图片消息
+			return "[IMAGE:" + imageContent.ImageKey + "]"
+		}
 	case "post":
 		var postContent struct {
 			Title   string `json:"title"`
 			Content [][]struct {
-				Tag  string `json:"tag"`
-				Text string `json:"text"`
+				Tag      string `json:"tag"`
+				Text     string `json:"text"`
+				ImageKey string `json:"image_key"`
 			} `json:"content"`
 		}
 		if err := json.Unmarshal([]byte(content), &postContent); err == nil {
 			var texts []string
+			var imageKeys []string
 			if postContent.Title != "" {
 				texts = append(texts, postContent.Title)
 			}
@@ -91,7 +101,16 @@ func ParseMessageContent(msgType, content string) string {
 					if item.Tag == "text" && item.Text != "" {
 						texts = append(texts, item.Text)
 					}
+					if item.Tag == "img" && item.ImageKey != "" {
+						imageKeys = append(imageKeys, item.ImageKey)
+					}
 				}
+			}
+			// 如果有图片，返回特殊格式，包含图片和文字
+			if len(imageKeys) > 0 {
+				text := strings.Join(texts, " ")
+				// 格式: [POST_IMAGE:image_key]文字内容
+				return "[POST_IMAGE:" + imageKeys[0] + "]" + text
 			}
 			return strings.Join(texts, " ")
 		}
@@ -100,6 +119,54 @@ func ParseMessageContent(msgType, content string) string {
 		return parseInteractiveContent(content)
 	}
 	return ""
+}
+
+// IsImageMessage 检查消息内容是否是纯图片消息
+func IsImageMessage(content string) bool {
+	return strings.HasPrefix(content, "[IMAGE:") && strings.HasSuffix(content, "]")
+}
+
+// IsPostWithImage 检查消息内容是否是带图片的富文本消息
+func IsPostWithImage(content string) bool {
+	return strings.HasPrefix(content, "[POST_IMAGE:")
+}
+
+// HasImage 检查消息是否包含图片（纯图片或富文本图片）
+func HasImage(content string) bool {
+	return IsImageMessage(content) || IsPostWithImage(content)
+}
+
+// ExtractImageKey 从图片消息中提取 image_key
+func ExtractImageKey(content string) string {
+	if IsImageMessage(content) {
+		return content[7 : len(content)-1]
+	}
+	return ""
+}
+
+// ExtractPostImageKey 从富文本消息中提取 image_key
+func ExtractPostImageKey(content string) string {
+	if !IsPostWithImage(content) {
+		return ""
+	}
+	// 格式: [POST_IMAGE:image_key]文字内容
+	endIdx := strings.Index(content, "]")
+	if endIdx == -1 {
+		return ""
+	}
+	return content[12:endIdx]
+}
+
+// ExtractPostText 从富文本消息中提取文字内容
+func ExtractPostText(content string) string {
+	if !IsPostWithImage(content) {
+		return content
+	}
+	endIdx := strings.Index(content, "]")
+	if endIdx == -1 || endIdx+1 >= len(content) {
+		return ""
+	}
+	return content[endIdx+1:]
 }
 
 // parseInteractiveContent 解析 interactive 卡片消息内容

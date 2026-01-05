@@ -104,6 +104,29 @@ func (hp *HybridProcessor) ProcessQuery(ctx context.Context, chatID, query strin
 	return hp.processWithNativeLLM(ctx, chatID, query)
 }
 
+// ProcessImageQuery 处理带图片的查询
+func (hp *HybridProcessor) ProcessImageQuery(ctx context.Context, userID, query string, imageData []byte) (string, error) {
+	if hp.llmClient == nil {
+		return "", fmt.Errorf("LLM client not initialized")
+	}
+
+	// 检查是否支持视觉模型
+	if !hp.llmClient.HasVisionSupport() {
+		return "当前未配置视觉模型，无法处理图片。", nil
+	}
+
+	log.Printf("Processing image query from %s, image size: %d bytes", userID, len(imageData))
+
+	// 调用视觉模型
+	response, err := hp.llmClient.ChatWithImage(ctx, query, imageData)
+	if err != nil {
+		log.Printf("Vision model error: %v", err)
+		return "", err
+	}
+
+	return response, nil
+}
+
 // processWithDify 使用 Dify 处理
 func (hp *HybridProcessor) processWithDify(ctx context.Context, userID, query string) (string, error) {
 	// 收集上下文数据

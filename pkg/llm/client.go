@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -521,6 +522,68 @@ func (c *Client) AnalyzeImage(ctx context.Context, imageBase64 string, mimeType 
 	resp, err := c.chat(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("vision analysis failed: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no response from vision model")
+	}
+
+	return resp.Choices[0].Message.Content, nil
+}
+
+// ChatWithImage 使用视觉模型分析图片并回答问题
+func (c *Client) ChatWithImage(ctx context.Context, query string, imageData []byte) (string, error) {
+	if c.visionConfig == nil || c.visionConfig.Model == "" {
+		return "", fmt.Errorf("vision model not configured")
+	}
+
+	// 检测图片类型
+	mimeType := "image/jpeg"
+	if len(imageData) > 8 {
+		// PNG 文件头: 89 50 4E 47
+		if imageData[0] == 0x89 && imageData[1] == 0x50 && imageData[2] == 0x4E && imageData[3] == 0x47 {
+			mimeType = "image/png"
+		}
+		// GIF 文件头: 47 49 46
+		if imageData[0] == 0x47 && imageData[1] == 0x49 && imageData[2] == 0x46 {
+			mimeType = "image/gif"
+		}
+		// WebP 文件头: 52 49 46 46 ... 57 45 42 50
+		if imageData[0] == 0x52 && imageData[1] == 0x49 && imageData[2] == 0x46 && imageData[3] == 0x46 {
+			mimeType = "image/webp"
+		}
+	}
+
+	// 转换为 base64
+	imageBase64 := base64.StdEncoding.EncodeToString(imageData)
+	dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType, imageBase64)
+
+	log.Printf("[LLM] ChatWithImage: using vision model %s, image type: %s, size: %d bytes",
+		c.visionConfig.Model, mimeType, len(imageData))
+
+	// 构建多模态消息
+	contentParts := []ContentPart{
+		{
+			Type: "text",
+			Text: query,
+		},
+		{
+			Type:     "image_url",
+			ImageURL: &ImageURL{URL: dataURI},
+		},
+	}
+
+	req := ChatRequest{
+		Model: c.visionConfig.Model,
+		Messages: []ChatMessage{
+			{Role: "user", Content: contentParts},
+		},
+		MaxTokens: 2048,
+	}
+
+	resp, err := c.chat(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("vision model request failed: %w", err)
 	}
 
 	if len(resp.Choices) == 0 {

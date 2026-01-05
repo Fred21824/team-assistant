@@ -158,12 +158,18 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 	if event.Message.ChatType == "p2p" {
 		content = strings.TrimSpace(content)
 		if content != "" {
-			log.Printf("Received private message: %s", content)
 			// 检查私聊权限
 			if !h.checkPrivateChatPermission(&event) {
 				safeGo(func() { h.replyNoPrivateChatPermission(&event) })
 				return
 			}
+			// 检查是否包含图片（纯图片或富文本图片）
+			if lark.HasImage(content) {
+				log.Printf("Received private message with image: %s", content)
+				safeGo(func() { h.handlePrivateImageMessage(&event, content) })
+				return
+			}
+			log.Printf("Received private message: %s", content)
 			safeGo(func() { h.handlePrivateCommand(&event, content) })
 		}
 		return
@@ -447,6 +453,69 @@ func (h *LarkWebhookHandler) handleAIQuery(ctx context.Context, messageID, userI
 
 	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", response); err != nil {
 		log.Printf("Failed to reply AI response: %v", err)
+	} else {
+		log.Printf("Reply sent successfully to message: %s", messageID)
+	}
+}
+
+// handlePrivateImageMessage 处理私聊中的图片消息（支持纯图片和富文本图片）
+func (h *LarkWebhookHandler) handlePrivateImageMessage(event *lark.MessageReceiveEvent, content string) {
+	ctx := context.Background()
+	messageID := event.Message.MessageID
+	senderOpenID := event.Sender.SenderID.OpenID
+
+	// 提取 image_key 和用户问题
+	var imageKey string
+	var query string
+	if lark.IsImageMessage(content) {
+		// 纯图片消息
+		imageKey = lark.ExtractImageKey(content)
+		query = "请描述这张图片的内容"
+	} else if lark.IsPostWithImage(content) {
+		// 富文本图片消息
+		imageKey = lark.ExtractPostImageKey(content)
+		query = lark.ExtractPostText(content)
+		if query == "" {
+			query = "请描述这张图片的内容"
+		}
+	}
+
+	if imageKey == "" {
+		log.Printf("Failed to extract image_key from content: %s", content)
+		h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", "无法识别图片，请重试")
+		return
+	}
+
+	log.Printf("Processing private image from %s, image_key: %s, query: %s", senderOpenID, imageKey, query)
+
+	// 下载图片
+	imageData, err := h.svcCtx.LarkClient.DownloadImage(ctx, messageID, imageKey)
+	if err != nil {
+		log.Printf("Failed to download image: %v", err)
+		h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", "无法下载图片，请重试")
+		return
+	}
+
+	log.Printf("Image downloaded, size: %d bytes", len(imageData))
+
+	// 使用视觉模型分析图片
+	response, err := h.processor.ProcessImageQuery(ctx, senderOpenID, query, imageData)
+	if err != nil {
+		log.Printf("Vision model error: %v", err)
+		h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", "图片分析失败："+err.Error())
+		return
+	}
+
+	log.Printf("Vision response generated, length: %d chars", len(response))
+
+	// 添加模型来源标识
+	visionModel := h.svcCtx.Config.LLM.VisionModel
+	if visionModel != "" {
+		response = response + "\n\n---\n_🖼️ Powered by " + visionModel + "_"
+	}
+
+	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", response); err != nil {
+		log.Printf("Failed to reply vision response: %v", err)
 	} else {
 		log.Printf("Reply sent successfully to message: %s", messageID)
 	}

@@ -490,7 +490,7 @@ func (c *Client) chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 	return c.chatOpenAI(ctx, req)
 }
 
-// chatOpenAI 使用 OpenAI 兼容格式 (OpenAI, Groq 等)
+// chatOpenAI 使用 OpenAI 兼容格式 (OpenAI, Groq, NVIDIA NIM 等)
 func (c *Client) chatOpenAI(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -529,7 +529,25 @@ func (c *Client) chatOpenAI(ctx context.Context, req ChatRequest) (*ChatResponse
 		return nil, fmt.Errorf("LLM error: %s", chatResp.Error.Message)
 	}
 
+	// 处理 MiniMax 等模型的 <think>...</think> 标签，只保留最终回答
+	for i := range chatResp.Choices {
+		chatResp.Choices[i].Message.Content = stripThinkingTags(chatResp.Choices[i].Message.Content)
+	}
+
 	return &chatResp, nil
+}
+
+// stripThinkingTags 移除模型输出中的思考过程标签
+// MiniMax-M2.1 等模型会在回答中包含 <think>...</think> 标签
+func stripThinkingTags(content string) string {
+	// 查找 </think> 标签的位置
+	thinkEndTag := "</think>"
+	if idx := strings.Index(content, thinkEndTag); idx != -1 {
+		// 返回 </think> 之后的内容，并去除首尾空白
+		return strings.TrimSpace(content[idx+len(thinkEndTag):])
+	}
+	// 如果没有 think 标签，返回原内容
+	return content
 }
 
 // chatAnthropic 使用 Anthropic API 格式

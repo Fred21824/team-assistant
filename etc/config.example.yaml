@@ -48,11 +48,24 @@ LLM:
   APIKey: "gsk_your_groq_api_key"
   Endpoint: "https://api.groq.com/openai/v1/chat/completions"
   Model: "llama-3.3-70b-versatile"
-  # 备用: OpenAI
+
+  # 备用方案 1: NVIDIA NIM + MiniMax-M2.1（推荐，推理能力强）
+  # Provider: "openai"
+  # APIKey: "nvapi-your-nvidia-api-key"
+  # Endpoint: "https://integrate.api.nvidia.com/v1/chat/completions"
+  # Model: "minimaxai/minimax-m2.1"
+
+  # 备用方案 2: OpenAI
   # Provider: "openai"
   # Endpoint: "https://api.openai.com/v1/chat/completions"
   # APIKey: "sk-your-openai-key"
   # Model: "gpt-4o-mini"
+
+  # 备用方案 3: Claude (需要代理)
+  # Provider: "anthropic"
+  # APIKey: "sk-ant-your-key"
+  # Endpoint: "https://api.anthropic.com/v1/messages"
+  # Model: "claude-sonnet-4-20250514"
 
 # Dify 配置（可选，启用后使用 Dify 处理对话）
 Dify:

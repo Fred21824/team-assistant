@@ -25,6 +25,14 @@ type MessageSyncer interface {
 	CreateSyncTask(ctx context.Context, chatID, chatName, requestedBy string) (int64, error)
 }
 
+// ImageContext 图片会话上下文
+type ImageContext struct {
+	ImageData []byte    // 图片数据
+	ImageKey  string    // 图片 key
+	MessageID string    // 原始消息 ID
+	CreatedAt time.Time // 创建时间
+}
+
 // LarkWebhookHandler 处理飞书事件回调
 type LarkWebhookHandler struct {
 	svcCtx       *svc.ServiceContext
@@ -33,15 +41,61 @@ type LarkWebhookHandler struct {
 	// 用户名缓存 (chatID -> (openID -> name))
 	userCache   map[string]map[string]string
 	userCacheMu sync.RWMutex
+	// 图片会话缓存 (messageID -> ImageContext)
+	imageCache   map[string]*ImageContext
+	imageCacheMu sync.RWMutex
 }
 
 // NewLarkWebhookHandler 创建飞书Webhook处理器
 func NewLarkWebhookHandler(svcCtx *svc.ServiceContext) *LarkWebhookHandler {
-	return &LarkWebhookHandler{
-		svcCtx:    svcCtx,
-		processor: ai.NewHybridProcessor(svcCtx),
-		userCache: make(map[string]map[string]string),
+	h := &LarkWebhookHandler{
+		svcCtx:     svcCtx,
+		processor:  ai.NewHybridProcessor(svcCtx),
+		userCache:  make(map[string]map[string]string),
+		imageCache: make(map[string]*ImageContext),
 	}
+	// 启动图片缓存清理协程
+	go h.cleanImageCache()
+	return h
+}
+
+// cleanImageCache 定期清理过期的图片缓存（保留10分钟）
+func (h *LarkWebhookHandler) cleanImageCache() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		h.imageCacheMu.Lock()
+		now := time.Now()
+		for msgID, ctx := range h.imageCache {
+			if now.Sub(ctx.CreatedAt) > 10*time.Minute {
+				delete(h.imageCache, msgID)
+			}
+		}
+		h.imageCacheMu.Unlock()
+	}
+}
+
+// cacheImage 缓存图片
+func (h *LarkWebhookHandler) cacheImage(messageID string, imageKey string, imageData []byte) {
+	h.imageCacheMu.Lock()
+	defer h.imageCacheMu.Unlock()
+	h.imageCache[messageID] = &ImageContext{
+		ImageData: imageData,
+		ImageKey:  imageKey,
+		MessageID: messageID,
+		CreatedAt: time.Now(),
+	}
+	log.Printf("Image cached for message: %s", messageID)
+}
+
+// getImageContext 获取图片上下文（通过 root_id 或 message_id）
+func (h *LarkWebhookHandler) getImageContext(rootID string) *ImageContext {
+	h.imageCacheMu.RLock()
+	defer h.imageCacheMu.RUnlock()
+	if ctx, ok := h.imageCache[rootID]; ok {
+		return ctx
+	}
+	return nil
 }
 
 // SetMessageSyncer 设置消息同步器
@@ -168,6 +222,14 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 				log.Printf("Received private message with image: %s", content)
 				safeGo(func() { h.handlePrivateImageMessage(&event, content) })
 				return
+			}
+			// 检查是否是图片话题的追问（通过 root_id 关联）
+			if event.Message.RootID != "" {
+				if imgCtx := h.getImageContext(event.Message.RootID); imgCtx != nil {
+					log.Printf("Received follow-up question for image message %s: %s", event.Message.RootID, content)
+					safeGo(func() { h.handleImageFollowUp(&event, content, imgCtx) })
+					return
+				}
 			}
 			log.Printf("Received private message: %s", content)
 			safeGo(func() { h.handlePrivateCommand(&event, content) })
@@ -498,6 +560,9 @@ func (h *LarkWebhookHandler) handlePrivateImageMessage(event *lark.MessageReceiv
 
 	log.Printf("Image downloaded, size: %d bytes", len(imageData))
 
+	// 缓存图片用于后续追问
+	h.cacheImage(messageID, imageKey, imageData)
+
 	// 使用视觉模型分析图片
 	response, err := h.processor.ProcessImageQuery(ctx, senderOpenID, query, imageData)
 	if err != nil {
@@ -518,6 +583,37 @@ func (h *LarkWebhookHandler) handlePrivateImageMessage(event *lark.MessageReceiv
 		log.Printf("Failed to reply vision response: %v", err)
 	} else {
 		log.Printf("Reply sent successfully to message: %s", messageID)
+	}
+}
+
+// handleImageFollowUp 处理图片话题的追问
+func (h *LarkWebhookHandler) handleImageFollowUp(event *lark.MessageReceiveEvent, query string, imgCtx *ImageContext) {
+	ctx := context.Background()
+	messageID := event.Message.MessageID
+	senderOpenID := event.Sender.SenderID.OpenID
+
+	log.Printf("Processing image follow-up from %s, original image: %s, query: %s", senderOpenID, imgCtx.ImageKey, query)
+
+	// 使用缓存的图片和新问题调用视觉模型
+	response, err := h.processor.ProcessImageQuery(ctx, senderOpenID, query, imgCtx.ImageData)
+	if err != nil {
+		log.Printf("Vision model error for follow-up: %v", err)
+		h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", "图片分析失败："+err.Error())
+		return
+	}
+
+	log.Printf("Vision follow-up response generated, length: %d chars", len(response))
+
+	// 添加模型来源标识
+	visionModel := h.svcCtx.Config.LLM.VisionModel
+	if visionModel != "" {
+		response = response + "\n\n---\n_🖼️ Powered by " + visionModel + "_"
+	}
+
+	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", response); err != nil {
+		log.Printf("Failed to reply vision follow-up response: %v", err)
+	} else {
+		log.Printf("Follow-up reply sent successfully to message: %s", messageID)
 	}
 }
 

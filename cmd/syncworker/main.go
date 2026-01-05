@@ -468,7 +468,8 @@ func (s *AutoSyncScheduler) messageExists(ctx context.Context, messageID string)
 	return count > 0, nil
 }
 
-// formatLarkTimestamp 格式化为飞书时间戳（毫秒）
+// formatLarkTimestamp 格式化为飞书时间戳（秒）
+// 注意：飞书 API 的 start_time/end_time 参数使用秒级 Unix 时间戳
 func formatLarkTimestamp(t time.Time) string {
-	return strconv.FormatInt(t.UnixMilli(), 10)
+	return strconv.FormatInt(t.Unix(), 10)
 }

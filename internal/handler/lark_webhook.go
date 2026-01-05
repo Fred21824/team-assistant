@@ -433,6 +433,12 @@ func (h *LarkWebhookHandler) handleAIQuery(ctx context.Context, messageID, userI
 
 	log.Printf("AI response generated, length: %d chars", len(response))
 
+	// 添加模型来源标识
+	modelName := h.svcCtx.Config.LLM.Model
+	if modelName != "" {
+		response = response + "\n\n---\n_🤖 Powered by " + modelName + "_"
+	}
+
 	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", response); err != nil {
 		log.Printf("Failed to reply AI response: %v", err)
 	} else {

@@ -616,10 +616,35 @@ func (h *LarkWebhookHandler) checkPrivateChatPermission(event *lark.MessageRecei
 // replyNoPrivateChatPermission 回复无私聊权限
 func (h *LarkWebhookHandler) replyNoPrivateChatPermission(event *lark.MessageReceiveEvent) {
 	ctx := context.Background()
-	reply := "抱歉，您没有私聊机器人的权限。\n\n请在群聊中 @机器人 使用（群成员需 >= 10 人）。"
+	reply := "抱歉，您没有私聊机器人的权限。"
 	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, event.Message.MessageID, "text", reply); err != nil {
 		log.Printf("Failed to reply no permission: %v", err)
 	}
+}
+
+// isAllowedUser 检查用户是否在白名单中
+func (h *LarkWebhookHandler) isAllowedUser(openID string) bool {
+	allowedUsers := h.svcCtx.Config.Permissions.PrivateChatAllowedUsers
+	if len(allowedUsers) == 0 {
+		return false
+	}
+
+	ctx := context.Background()
+	userInfo, err := h.svcCtx.LarkClient.GetUserInfo(ctx, openID)
+	if err != nil {
+		log.Printf("Failed to get user info for whitelist check: %v", err)
+		return false
+	}
+
+	userName := strings.ToLower(userInfo.Name)
+	enName := strings.ToLower(userInfo.EnName)
+	for _, allowed := range allowedUsers {
+		allowedLower := strings.ToLower(allowed)
+		if userName == allowedLower || enName == allowedLower {
+			return true
+		}
+	}
+	return false
 }
 
 // checkGroupPermission 检查群聊是否满足成员数要求
@@ -627,6 +652,12 @@ func (h *LarkWebhookHandler) checkGroupPermission(event *lark.MessageReceiveEven
 	// 如果没有配置最小成员数，默认允许
 	minMembers := h.svcCtx.Config.Permissions.GroupMinMembers
 	if minMembers <= 0 {
+		return true
+	}
+
+	// 白名单用户不受群成员数限制
+	if h.isAllowedUser(event.Sender.SenderID.OpenID) {
+		log.Printf("User %s is in whitelist, bypassing group member check", event.Sender.SenderID.OpenID)
 		return true
 	}
 

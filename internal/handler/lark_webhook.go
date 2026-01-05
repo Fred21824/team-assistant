@@ -361,6 +361,12 @@ func (h *LarkWebhookHandler) processQuery(chatID, messageID, query string) {
 		reply = "处理请求时出错，请稍后重试。"
 	}
 
+	// 添加模型来源标识
+	modelName := h.svcCtx.Config.LLM.Model
+	if modelName != "" {
+		reply = reply + "\n\n---\n_🤖 Powered by " + modelName + "_"
+	}
+
 	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", reply); err != nil {
 		log.Printf("Failed to reply message: %v", err)
 	}

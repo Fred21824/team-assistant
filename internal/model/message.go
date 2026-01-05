@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -174,6 +176,130 @@ func (m *ChatMessageModel) searchByLike(ctx context.Context, chatID, keyword str
 		messages = append(messages, &msg)
 	}
 	return messages, nil
+}
+
+// SearchByMultipleKeywords 多关键词联合搜索（AND 逻辑，同时包含所有关键词）
+func (m *ChatMessageModel) SearchByMultipleKeywords(ctx context.Context, chatID string, keywords []string, limit int) ([]*ChatMessage, error) {
+	if len(keywords) == 0 {
+		return nil, nil
+	}
+
+	// 构建 WHERE 条件：所有关键词都必须匹配
+	var conditions []string
+	var args []interface{}
+
+	if chatID != "" {
+		conditions = append(conditions, "chat_id = ?")
+		args = append(args, chatID)
+	}
+
+	for _, kw := range keywords {
+		if len(kw) >= 2 {
+			conditions = append(conditions, "content LIKE ?")
+			args = append(args, "%"+kw+"%")
+		}
+	}
+
+	if len(conditions) == 0 {
+		return nil, nil
+	}
+
+	query := fmt.Sprintf(`SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
+              FROM chat_messages
+              WHERE %s
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) DESC LIMIT ?`,
+		strings.Join(conditions, " AND "))
+
+	args = append(args, limit)
+
+	rows, err := m.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []*ChatMessage
+	for rows.Next() {
+		var msg ChatMessage
+		err := rows.Scan(&msg.ID, &msg.MessageID, &msg.ChatID, &msg.SenderID, &msg.SenderName,
+			&msg.MemberID, &msg.MsgType, &msg.Content, &msg.RawContent, &msg.Mentions,
+			&msg.ReplyToID, &msg.ThreadID, &msg.RootID, &msg.IsAtBot, &msg.CreatedAt, &msg.CreatedAtTs, &msg.IndexedAt)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, &msg)
+	}
+	return messages, nil
+}
+
+// SearchByKeywordCombinations 组合关键词搜索（先尝试全部匹配，再逐步放宽）
+// 返回消息和每条消息匹配的关键词数量
+func (m *ChatMessageModel) SearchByKeywordCombinations(ctx context.Context, chatID string, keywords []string, limit int) ([]*ChatMessage, map[int64]int, error) {
+	if len(keywords) == 0 {
+		return nil, nil, nil
+	}
+
+	messageMap := make(map[int64]*ChatMessage)
+	matchCount := make(map[int64]int) // 记录每条消息匹配了多少个关键词
+
+	// 策略1：先尝试所有关键词 AND 搜索（最精确）
+	if len(keywords) >= 2 {
+		msgs, err := m.SearchByMultipleKeywords(ctx, chatID, keywords, limit)
+		if err == nil {
+			for _, msg := range msgs {
+				messageMap[msg.ID] = msg
+				matchCount[msg.ID] = len(keywords)
+			}
+		}
+	}
+
+	// 策略2：如果结果不足，尝试任意两个关键词组合
+	if len(messageMap) < limit && len(keywords) >= 2 {
+		for i := 0; i < len(keywords); i++ {
+			for j := i + 1; j < len(keywords); j++ {
+				if len(messageMap) >= limit {
+					break
+				}
+				pair := []string{keywords[i], keywords[j]}
+				msgs, err := m.SearchByMultipleKeywords(ctx, chatID, pair, limit-len(messageMap))
+				if err == nil {
+					for _, msg := range msgs {
+						if _, exists := messageMap[msg.ID]; !exists {
+							messageMap[msg.ID] = msg
+							matchCount[msg.ID] = 2
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 策略3：如果还不足，单关键词搜索补充
+	if len(messageMap) < limit {
+		for _, kw := range keywords {
+			if len(messageMap) >= limit {
+				break
+			}
+			msgs, err := m.SearchByContent(ctx, chatID, kw, limit-len(messageMap))
+			if err == nil {
+				for _, msg := range msgs {
+					if _, exists := messageMap[msg.ID]; !exists {
+						messageMap[msg.ID] = msg
+						matchCount[msg.ID] = 1
+					}
+				}
+			}
+		}
+	}
+
+	// 转换为列表
+	var messages []*ChatMessage
+	for _, msg := range messageMap {
+		messages = append(messages, msg)
+	}
+
+	return messages, matchCount, nil
 }
 
 // SearchBySender 按发送者搜索消息

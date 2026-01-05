@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -795,15 +796,18 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 	keywords := hp.extractSearchKeywords(query, parsed.Keywords)
 	log.Printf("QA search keywords: %v", keywords)
 
-	// 使用混合搜索：同时使用 RAG 语义搜索和关键词搜索
-	messageMap := make(map[string]string) // 用于去重 (content -> formatted message)
+	// 使用改进的搜索策略：优先匹配多关键词，按相关度排序
+	type scoredMessage struct {
+		content   string
+		formatted string
+		score     int // 匹配的关键词数量，越多越相关
+		timestamp time.Time
+	}
+	messageScores := make(map[string]*scoredMessage) // content -> scored message
 
-	// 1. 先尝试关键词搜索（更精确）
-	for _, kw := range keywords {
-		if len(kw) < 2 {
-			continue // 跳过太短的关键词
-		}
-		messages, err := hp.svcCtx.MessageModel.SearchByContent(ctx, chatID, kw, 30)
+	// 1. 使用组合关键词搜索（优先返回同时匹配多个关键词的消息）
+	if len(keywords) >= 1 {
+		messages, matchCounts, err := hp.svcCtx.MessageModel.SearchByKeywordCombinations(ctx, chatID, keywords, 100)
 		if err == nil {
 			for _, msg := range messages {
 				if msg.Content.Valid {
@@ -811,7 +815,7 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 					if hasTimeFilter && (msg.CreatedAt.Before(startTime) || msg.CreatedAt.After(endTime)) {
 						continue
 					}
-					// 获取发送者名称，如果为空则显示"系统/机器人"
+					// 获取发送者名称
 					senderName := "系统/机器人"
 					if msg.SenderName.Valid && msg.SenderName.String != "" {
 						senderName = msg.SenderName.String
@@ -820,11 +824,22 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 						msg.CreatedAt.Format("01-02 15:04"),
 						senderName,
 						msg.Content.String)
-					messageMap[msg.Content.String] = formatted
+
+					score := matchCounts[msg.ID]
+					if existing, exists := messageScores[msg.Content.String]; !exists || score > existing.score {
+						messageScores[msg.Content.String] = &scoredMessage{
+							content:   msg.Content.String,
+							formatted: formatted,
+							score:     score,
+							timestamp: msg.CreatedAt,
+						}
+					}
 				}
 			}
+			log.Printf("Keyword combination search: found %d messages", len(messages))
+		} else {
+			log.Printf("Keyword combination search failed: %v", err)
 		}
-		log.Printf("Keyword search '%s': found %d messages", kw, len(messages))
 	}
 
 	// 2. 使用混合搜索补充（语义 + 关键词融合 + 同义词扩展）
@@ -843,30 +858,56 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 			hybridOpts.EndTime = &endTime
 		}
 
-		results, err := hp.svcCtx.Services.RAG.HybridSearch(ctx, searchQuery, keywords, 30, hybridOpts)
+		results, err := hp.svcCtx.Services.RAG.HybridSearch(ctx, searchQuery, keywords, 50, hybridOpts)
 		if err != nil {
 			log.Printf("Hybrid search failed: %v", err)
 		} else {
 			log.Printf("Hybrid search found %d results", len(results))
 			for _, r := range results {
-				if _, exists := messageMap[r.Content]; !exists {
-					formatted := fmt.Sprintf("[%s] %s: %s",
-						r.CreatedAt.Format("01-02 15:04"),
-						r.SenderName,
-						r.Content)
-					messageMap[r.Content] = formatted
+				if _, exists := messageScores[r.Content]; !exists {
+					// 计算这条消息匹配了多少个关键词
+					score := 0
+					contentLower := strings.ToLower(r.Content)
+					for _, kw := range keywords {
+						if strings.Contains(contentLower, strings.ToLower(kw)) {
+							score++
+						}
+					}
+					messageScores[r.Content] = &scoredMessage{
+						content:   r.Content,
+						formatted: fmt.Sprintf("[%s] %s: %s", r.CreatedAt.Format("01-02 15:04"), r.SenderName, r.Content),
+						score:     score,
+						timestamp: r.CreatedAt,
+					}
 				}
 			}
 		}
 	}
 
-	// 转换为列表
+	// 3. 按相关度排序（关键词匹配数 > 时间）
+	var sortedMessages []*scoredMessage
+	for _, sm := range messageScores {
+		sortedMessages = append(sortedMessages, sm)
+	}
+	sort.Slice(sortedMessages, func(i, j int) bool {
+		// 首先按匹配的关键词数量降序
+		if sortedMessages[i].score != sortedMessages[j].score {
+			return sortedMessages[i].score > sortedMessages[j].score
+		}
+		// 相同分数按时间降序
+		return sortedMessages[i].timestamp.After(sortedMessages[j].timestamp)
+	})
+
+	// 转换为列表（最多取前 80 条，保证高相关度消息在前）
 	var relevantMessages []string
-	for _, msg := range messageMap {
-		relevantMessages = append(relevantMessages, msg)
+	for i, sm := range sortedMessages {
+		if i >= 80 {
+			break
+		}
+		relevantMessages = append(relevantMessages, sm.formatted)
 	}
 
-	log.Printf("Total unique messages found: %d", len(relevantMessages))
+	log.Printf("Total unique messages found: %d (after sorting by relevance)", len(relevantMessages))
 
 	if len(relevantMessages) == 0 {
 		return "抱歉，我在聊天记录中没有找到与您问题相关的信息。您可以尝试：\n• 换个关键词提问\n• 指定具体的群名\n• 使用「搜索 XXX」查找相关消息", nil

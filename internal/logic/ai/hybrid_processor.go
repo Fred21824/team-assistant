@@ -19,6 +19,12 @@ import (
 	"team-assistant/pkg/llm"
 )
 
+// ChatTurn 单轮对话（用于图片多轮对话）
+type ChatTurn struct {
+	Query    string // 用户问题
+	Response string // 助手回复
+}
+
 // ConversationContext 对话上下文
 type ConversationContext struct {
 	LastQuery     string           // 上一个问题
@@ -119,6 +125,39 @@ func (hp *HybridProcessor) ProcessImageQuery(ctx context.Context, userID, query 
 
 	// 调用视觉模型
 	response, err := hp.llmClient.ChatWithImage(ctx, query, imageData)
+	if err != nil {
+		log.Printf("Vision model error: %v", err)
+		return "", err
+	}
+
+	return response, nil
+}
+
+// ProcessImageQueryWithHistory 处理带图片和对话历史的查询
+func (hp *HybridProcessor) ProcessImageQueryWithHistory(ctx context.Context, userID, query string, imageData []byte, history []ChatTurn) (string, error) {
+	if hp.llmClient == nil {
+		return "", fmt.Errorf("LLM client not initialized")
+	}
+
+	// 检查是否支持视觉模型
+	if !hp.llmClient.HasVisionSupport() {
+		return "当前未配置视觉模型，无法处理图片。", nil
+	}
+
+	log.Printf("Processing image query with history from %s, image size: %d bytes, history turns: %d",
+		userID, len(imageData), len(history))
+
+	// 转换历史格式
+	var llmHistory []llm.ChatTurn
+	for _, turn := range history {
+		llmHistory = append(llmHistory, llm.ChatTurn{
+			Query:    turn.Query,
+			Response: turn.Response,
+		})
+	}
+
+	// 调用视觉模型（带历史）
+	response, err := hp.llmClient.ChatWithImageAndHistory(ctx, query, imageData, llmHistory)
 	if err != nil {
 		log.Printf("Vision model error: %v", err)
 		return "", err

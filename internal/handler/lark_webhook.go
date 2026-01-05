@@ -25,12 +25,19 @@ type MessageSyncer interface {
 	CreateSyncTask(ctx context.Context, chatID, chatName, requestedBy string) (int64, error)
 }
 
+// ChatTurn 单轮对话
+type ChatTurn struct {
+	Query    string // 用户问题
+	Response string // 助手回复
+}
+
 // ImageContext 图片会话上下文
 type ImageContext struct {
-	ImageData []byte    // 图片数据
-	ImageKey  string    // 图片 key
-	MessageID string    // 原始消息 ID
-	CreatedAt time.Time // 创建时间
+	ImageData []byte     // 图片数据
+	ImageKey  string     // 图片 key
+	MessageID string     // 原始消息 ID
+	CreatedAt time.Time  // 创建时间
+	History   []ChatTurn // 对话历史
 }
 
 // LarkWebhookHandler 处理飞书事件回调
@@ -96,6 +103,19 @@ func (h *LarkWebhookHandler) getImageContext(rootID string) *ImageContext {
 		return ctx
 	}
 	return nil
+}
+
+// appendHistory 追加对话历史到图片上下文
+func (h *LarkWebhookHandler) appendHistory(messageID string, query, response string) {
+	h.imageCacheMu.Lock()
+	defer h.imageCacheMu.Unlock()
+	if ctx, ok := h.imageCache[messageID]; ok {
+		ctx.History = append(ctx.History, ChatTurn{
+			Query:    query,
+			Response: response,
+		})
+		log.Printf("Appended history to image context %s, total turns: %d", messageID, len(ctx.History))
+	}
 }
 
 // SetMessageSyncer 设置消息同步器
@@ -573,6 +593,9 @@ func (h *LarkWebhookHandler) handlePrivateImageMessage(event *lark.MessageReceiv
 
 	log.Printf("Vision response generated, length: %d chars", len(response))
 
+	// 保存首次对话到历史
+	h.appendHistory(messageID, query, response)
+
 	// 添加模型来源标识
 	visionModel := h.svcCtx.Config.LLM.VisionModel
 	if visionModel != "" {
@@ -590,12 +613,23 @@ func (h *LarkWebhookHandler) handlePrivateImageMessage(event *lark.MessageReceiv
 func (h *LarkWebhookHandler) handleImageFollowUp(event *lark.MessageReceiveEvent, query string, imgCtx *ImageContext) {
 	ctx := context.Background()
 	messageID := event.Message.MessageID
+	rootID := event.Message.RootID // 原始图片消息的 ID
 	senderOpenID := event.Sender.SenderID.OpenID
 
-	log.Printf("Processing image follow-up from %s, original image: %s, query: %s", senderOpenID, imgCtx.ImageKey, query)
+	log.Printf("Processing image follow-up from %s, original image: %s, history turns: %d, query: %s",
+		senderOpenID, imgCtx.ImageKey, len(imgCtx.History), query)
 
-	// 使用缓存的图片和新问题调用视觉模型
-	response, err := h.processor.ProcessImageQuery(ctx, senderOpenID, query, imgCtx.ImageData)
+	// 构建历史消息
+	var history []ai.ChatTurn
+	for _, turn := range imgCtx.History {
+		history = append(history, ai.ChatTurn{
+			Query:    turn.Query,
+			Response: turn.Response,
+		})
+	}
+
+	// 使用缓存的图片、历史和新问题调用视觉模型
+	response, err := h.processor.ProcessImageQueryWithHistory(ctx, senderOpenID, query, imgCtx.ImageData, history)
 	if err != nil {
 		log.Printf("Vision model error for follow-up: %v", err)
 		h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", "图片分析失败："+err.Error())
@@ -603,6 +637,9 @@ func (h *LarkWebhookHandler) handleImageFollowUp(event *lark.MessageReceiveEvent
 	}
 
 	log.Printf("Vision follow-up response generated, length: %d chars", len(response))
+
+	// 保存本次对话到历史（使用原始图片消息的 ID）
+	h.appendHistory(rootID, query, response)
 
 	// 添加模型来源标识
 	visionModel := h.svcCtx.Config.LLM.VisionModel

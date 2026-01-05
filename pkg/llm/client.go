@@ -74,6 +74,12 @@ type VisionConfig struct {
 	APIKey   string // 视觉模型 API Key（可选，为空则使用主 API Key）
 }
 
+// ChatTurn 单轮对话（用于多轮对话历史）
+type ChatTurn struct {
+	Query    string // 用户问题
+	Response string // 助手回复
+}
+
 // Client LLM客户端
 type Client struct {
 	apiKey       string
@@ -538,21 +544,7 @@ func (c *Client) ChatWithImage(ctx context.Context, query string, imageData []by
 	}
 
 	// 检测图片类型
-	mimeType := "image/jpeg"
-	if len(imageData) > 8 {
-		// PNG 文件头: 89 50 4E 47
-		if imageData[0] == 0x89 && imageData[1] == 0x50 && imageData[2] == 0x4E && imageData[3] == 0x47 {
-			mimeType = "image/png"
-		}
-		// GIF 文件头: 47 49 46
-		if imageData[0] == 0x47 && imageData[1] == 0x49 && imageData[2] == 0x46 {
-			mimeType = "image/gif"
-		}
-		// WebP 文件头: 52 49 46 46 ... 57 45 42 50
-		if imageData[0] == 0x52 && imageData[1] == 0x49 && imageData[2] == 0x46 && imageData[3] == 0x46 {
-			mimeType = "image/webp"
-		}
-	}
+	mimeType := detectImageMimeType(imageData)
 
 	// 转换为 base64
 	imageBase64 := base64.StdEncoding.EncodeToString(imageData)
@@ -591,6 +583,102 @@ func (c *Client) ChatWithImage(ctx context.Context, query string, imageData []by
 	}
 
 	return resp.Choices[0].Message.Content, nil
+}
+
+// ChatWithImageAndHistory 使用视觉模型分析图片并回答问题（带对话历史）
+func (c *Client) ChatWithImageAndHistory(ctx context.Context, query string, imageData []byte, history []ChatTurn) (string, error) {
+	if c.visionConfig == nil || c.visionConfig.Model == "" {
+		return "", fmt.Errorf("vision model not configured")
+	}
+
+	// 检测图片类型
+	mimeType := detectImageMimeType(imageData)
+
+	// 转换为 base64
+	imageBase64 := base64.StdEncoding.EncodeToString(imageData)
+	dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType, imageBase64)
+
+	log.Printf("[LLM] ChatWithImageAndHistory: using vision model %s, image type: %s, size: %d bytes, history turns: %d",
+		c.visionConfig.Model, mimeType, len(imageData), len(history))
+
+	// 构建消息列表
+	var messages []ChatMessage
+
+	// 第一条消息：图片 + 第一个问题
+	if len(history) > 0 {
+		// 有历史：第一条消息是图片+第一个问题
+		firstContentParts := []ContentPart{
+			{
+				Type: "text",
+				Text: history[0].Query,
+			},
+			{
+				Type:     "image_url",
+				ImageURL: &ImageURL{URL: dataURI},
+			},
+		}
+		messages = append(messages, ChatMessage{Role: "user", Content: firstContentParts})
+		messages = append(messages, ChatMessage{Role: "assistant", Content: history[0].Response})
+
+		// 添加剩余历史
+		for i := 1; i < len(history); i++ {
+			messages = append(messages, ChatMessage{Role: "user", Content: history[i].Query})
+			messages = append(messages, ChatMessage{Role: "assistant", Content: history[i].Response})
+		}
+
+		// 添加当前问题
+		messages = append(messages, ChatMessage{Role: "user", Content: query})
+	} else {
+		// 无历史：直接发送图片+问题
+		contentParts := []ContentPart{
+			{
+				Type: "text",
+				Text: query,
+			},
+			{
+				Type:     "image_url",
+				ImageURL: &ImageURL{URL: dataURI},
+			},
+		}
+		messages = append(messages, ChatMessage{Role: "user", Content: contentParts})
+	}
+
+	req := ChatRequest{
+		Model:     c.visionConfig.Model,
+		Messages:  messages,
+		MaxTokens: 2048,
+	}
+
+	resp, err := c.chat(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("vision model request failed: %w", err)
+	}
+
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("no response from vision model")
+	}
+
+	return resp.Choices[0].Message.Content, nil
+}
+
+// detectImageMimeType 检测图片的 MIME 类型
+func detectImageMimeType(imageData []byte) string {
+	mimeType := "image/jpeg"
+	if len(imageData) > 8 {
+		// PNG 文件头: 89 50 4E 47
+		if imageData[0] == 0x89 && imageData[1] == 0x50 && imageData[2] == 0x4E && imageData[3] == 0x47 {
+			mimeType = "image/png"
+		}
+		// GIF 文件头: 47 49 46
+		if imageData[0] == 0x47 && imageData[1] == 0x49 && imageData[2] == 0x46 {
+			mimeType = "image/gif"
+		}
+		// WebP 文件头: 52 49 46 46 ... 57 45 42 50
+		if imageData[0] == 0x52 && imageData[1] == 0x49 && imageData[2] == 0x46 && imageData[3] == 0x46 {
+			mimeType = "image/webp"
+		}
+	}
+	return mimeType
 }
 
 func (c *Client) chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {

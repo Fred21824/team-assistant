@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -319,8 +320,13 @@ func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChat
 	// 判断是否是追问：明确的追问模式 或 可能的追问（短查询+有上下文）
 	isFollowUp := hp.isFollowUpQuestion(originalQuery) || hp.isLikelyFollowUp(originalQuery, prevContext)
 
+	// 检查是否可能是站点查询（包含纯数字或字母+数字组合）
+	// 站点查询应该走正常流程，不要从上下文回答
+	isSiteQueryLike := hp.mightBeSiteQuery(originalQuery)
+
 	// 如果是追问且有上一轮回答，直接让 LLM 从上一轮回答中提取信息
-	if isFollowUp && prevContext != nil && prevContext.LastAnswer != "" {
+	// 但如果可能是站点查询，跳过追问逻辑，走正常意图解析
+	if isFollowUp && prevContext != nil && prevContext.LastAnswer != "" && !isSiteQueryLike {
 		log.Printf("Follow-up question detected (query: %s), answering from previous context", originalQuery)
 		answer, err := hp.answerFollowUpFromContext(ctx, originalQuery, prevContext)
 		if err == nil && answer != "" {
@@ -950,6 +956,26 @@ func (hp *HybridProcessor) isStopWord(word string) bool {
 	return stopWords[strings.ToLower(word)]
 }
 
+// mightBeSiteQuery 检测是否可能是站点查询
+// 站点查询包含：纯数字ID（如2891、3040）或字母+数字组合（如l08、by4）
+func (hp *HybridProcessor) mightBeSiteQuery(query string) bool {
+	// 检查是否包含站点ID（3-5位纯数字）
+	// 例如："2891是哪个站点"、"3040的前缀"
+	siteIDPattern := regexp.MustCompile(`\b\d{3,5}\b`)
+	if siteIDPattern.MatchString(query) {
+		return true
+	}
+
+	// 检查是否包含站点前缀（1-3个字母+1-3个数字）
+	// 例如："l08"、"by4"、"abc01"
+	sitePrefixPattern := regexp.MustCompile(`(?i)\b[a-z]{1,3}\d{1,3}\b`)
+	if sitePrefixPattern.MatchString(query) {
+		return true
+	}
+
+	return false
+}
+
 // isRoleQuery 检测是否是询问人员角色的问题
 // 例如："后端是谁"、"产品经理有哪些人"
 // 但不匹配："归集是谁做的"、"XX功能是谁做的"
@@ -1168,37 +1194,20 @@ func (hp *HybridProcessor) answerWithContext(ctx context.Context, question, cont
 		return "", fmt.Errorf("LLM client not available")
 	}
 
-	prompt := fmt.Sprintf(`你是一个专业的团队助手，请根据聊天记录精准回答用户问题。
+	prompt := fmt.Sprintf(`根据聊天记录回答问题。
 
-【用户问题】
+【问题】%s
+
+【聊天记录】
 %s
 
-【相关聊天记录】
-%s
+【严格要求】
+1. 只能使用上面聊天记录中**明确出现**的信息
+2. 禁止编造任何订单号、金额、时间等具体数据
+3. 如果记录中没有相关信息，必须回答"在提供的聊天记录中未找到相关信息"
+4. 引用信息时标注来源，如"根据[01-05 10:30]的消息..."
 
-【回答要求】
-1. **具体化**：必须引用聊天记录中的具体信息
-   - 涉及站点时，列出具体站点名称/前缀（如 l08、by4）
-   - 涉及时间时，引用原始时间戳
-   - 涉及人员时，使用消息中的发送者名称
-   - 涉及问题时，引用具体错误信息或问题描述
-
-2. **结构化输出**：
-   - 如果是问题/错误统计：按类型分组，列出每类问题+出现次数+具体案例
-   - 如果是人员查询：列出相关人员及其具体工作内容
-   - 如果是事件回顾：按时间顺序列出关键事件
-
-3. **格式规范**：
-   - 使用 emoji 标记不同类型（📍站点 ⚠️问题 👤人员 📅时间）
-   - 每个要点独占一行
-   - 重要信息加粗或标注
-
-4. **数据来源**：
-   - 只从聊天记录提取，不编造
-   - 如果信息不足，明确说明"根据现有记录，未找到关于XXX的详细信息"
-   - 如果有多个相关消息，综合分析后给出结论
-
-请直接回答：`, question, context)
+回答：`, question, context)
 
 	return hp.llmClient.GenerateResponse(ctx, prompt, nil)
 }

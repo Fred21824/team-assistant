@@ -1,0 +1,68 @@
+# Team Assistant 配置文件 - 服务器版本模板
+# 复制此文件为 config.server.yaml 并填入真实配置
+
+Server:
+  Port: 8090
+  Mode: release
+
+# 数据库配置 - 服务器本地连接
+MySQL:
+  Host: "127.0.0.1:3306"
+  User: "root"
+  Password: "your_mysql_password"
+  Database: "team_assistant"
+
+# Redis 配置 - 服务器本地连接
+Redis:
+  Host: "127.0.0.1:6379"
+  Password: "your_redis_password"
+  DB: 5
+
+# 飞书配置
+Lark:
+  Domain: "https://open.larksuite.com"
+  AppID: "your_lark_app_id"
+  AppSecret: "your_lark_app_secret"
+  VerificationToken: ""
+  EncryptKey: ""
+  BotOpenID: ""
+
+# GitHub 配置
+GitHub:
+  Token: "your_github_token"
+  WebhookSecret: ""
+  Organizations:
+    - "your_org"
+
+# LLM 配置
+LLM:
+  Provider: "anthropic"
+  APIKey: "your_anthropic_api_key"
+  Endpoint: "https://api.anthropic.com/v1/messages"
+  Model: "claude-haiku-4-5-20251001"
+  # HTTP 代理配置（如需要）
+  ProxyHost: ""
+  ProxyPort: 0
+  ProxyUser: ""
+  ProxyPassword: ""
+
+# Dify 配置
+Dify:
+  Enabled: false
+  BaseURL: "http://127.0.0.1:8088"
+  APIKey: ""
+  DatasetID: ""
+
+# 向量数据库配置
+VectorDB:
+  Enabled: true
+  QdrantEndpoint: "http://127.0.0.1:6333"
+  OllamaEndpoint: "http://127.0.0.1:11434"
+  EmbeddingModel: "nomic-embed-text"
+  CollectionName: "lark_messages"
+
+# Bitable 配置
+Bitable:
+  Enabled: false
+  AppToken: ""
+  TableID: ""

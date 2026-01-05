@@ -25,6 +25,7 @@ Thumbs.db
 
 # Config with secrets (use config.example.yaml instead)
 etc/config.yaml
+etc/config.server.yaml
 
 # Logs
 *.log

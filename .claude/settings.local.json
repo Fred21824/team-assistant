@@ -62,7 +62,8 @@
       "Bash(# 停止旧进程 pkill -f \"\"./team-assistant\"\" || true sleep 2 # 启动新的 API 进程 nohup ./team-assistant 2>&1 & echo $! sleep 2 cat .service.pid ps aux)",
       "Bash(# 检查 Qdrant 向量数据库的消息数量 curl -s \"\"http://18.166.182.134:6333/collections/lark_messages\"\" | python3 -m json.tool)",
       "Bash(grep:*)",
-      "Bash(./scripts/deploy.sh:*)"
+      "Bash(./scripts/deploy.sh:*)",
+      "Bash(git rm:*)"
     ]
   }
 }

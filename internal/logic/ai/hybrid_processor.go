@@ -348,9 +348,13 @@ func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChat
 	// 扩展查询需要重新搜索数据库，不能只从上一轮回答中提取
 	isExpandQueryLike := hp.isExpandQuery(originalQuery)
 
+	// 检查是否是新维度查询（如上一轮问完成时间，这一轮问产品经理）
+	// 新维度查询需要重新搜索，不能只从上一轮回答中提取
+	isNewDimensionQuery := hp.isNewDimensionQuery(originalQuery, prevContext)
+
 	// 如果是追问且有上一轮回答，直接让 LLM 从上一轮回答中提取信息
-	// 但如果可能是站点查询或扩展查询，跳过追问逻辑，走正常意图解析
-	if isFollowUp && prevContext != nil && prevContext.LastAnswer != "" && !isSiteQueryLike && !isExpandQueryLike {
+	// 但如果可能是站点查询、扩展查询或新维度查询，跳过追问逻辑，走正常意图解析
+	if isFollowUp && prevContext != nil && prevContext.LastAnswer != "" && !isSiteQueryLike && !isExpandQueryLike && !isNewDimensionQuery {
 		log.Printf("Follow-up question detected (query: %s), answering from previous context", originalQuery)
 		answer, err := hp.answerFollowUpFromContext(ctx, originalQuery, prevContext)
 		if err == nil && answer != "" {
@@ -1028,6 +1032,64 @@ func (hp *HybridProcessor) isExpandQuery(query string) bool {
 	return false
 }
 
+// isNewDimensionQuery 检测是否是新维度查询
+// 例如：上一轮问"代理模式什么时候完成"，这一轮问"代理模式产品经理是谁"
+// 虽然主题相同（代理模式），但查询维度不同（时间 vs 人员），需要重新搜索
+func (hp *HybridProcessor) isNewDimensionQuery(query string, prevContext *ConversationContext) bool {
+	if prevContext == nil || prevContext.LastQuery == "" {
+		return false
+	}
+
+	// 定义查询维度关键词
+	dimensionKeywords := map[string][]string{
+		"person": {"产品经理", "产品", "后端", "前端", "测试", "开发", "谁负责", "谁在", "是谁", "哪些人", "谁做"},
+		"time":   {"什么时候", "几点", "哪天", "日期", "时间", "完成时间", "上线时间", "提测时间"},
+		"status": {"进度", "状态", "完成了吗", "做完了吗", "怎么样了"},
+		"detail": {"怎么做", "如何", "方案", "设计", "实现"},
+	}
+
+	// 检测当前查询的维度
+	currentDimension := ""
+	for dim, keywords := range dimensionKeywords {
+		for _, kw := range keywords {
+			if strings.Contains(query, kw) {
+				currentDimension = dim
+				break
+			}
+		}
+		if currentDimension != "" {
+			break
+		}
+	}
+
+	// 如果当前查询没有明确维度，不算新维度查询
+	if currentDimension == "" {
+		return false
+	}
+
+	// 检测上一轮查询的维度
+	prevDimension := ""
+	for dim, keywords := range dimensionKeywords {
+		for _, kw := range keywords {
+			if strings.Contains(prevContext.LastQuery, kw) {
+				prevDimension = dim
+				break
+			}
+		}
+		if prevDimension != "" {
+			break
+		}
+	}
+
+	// 如果维度不同，说明是新维度查询
+	if currentDimension != "" && prevDimension != "" && currentDimension != prevDimension {
+		log.Printf("New dimension query detected: prev=%s, current=%s", prevDimension, currentDimension)
+		return true
+	}
+
+	return false
+}
+
 // buildExpandedQuery 根据上下文构建扩展查询
 // 当用户问"其他站呢？"时，从上下文中提取关键词，构建搜索所有站点的查询
 func (hp *HybridProcessor) buildExpandedQuery(originalQuery string, prevContext *ConversationContext) string {
@@ -1174,6 +1236,18 @@ func (hp *HybridProcessor) answerWithContext(ctx context.Context, question, cont
 - 如果问题是"XX需求/项目有哪些YY（角色）参与"，请从聊天记录中找出**讨论过该需求/项目的人**，而不是列出所有该角色的人
 - 发言人的名字格式通常是"姓名-角色"，如"张三-后端"、"李四-前端"
 - 只列出在相关讨论中**实际发言**的人
+
+【关键区分】
+- 问"XX需求/功能什么时候完成"：指的是**开发进度**（提测时间、上线时间、完成开发的时间），而不是系统运行日志中的执行时间
+- 机器人发送的自动日志（如"计算时间范围"、"处理结果"、"环境: prefix="等）是**系统运行日志**，不是需求进度信息
+- 如果只找到系统运行日志而没有人类讨论的开发进度信息，应回答"未找到该需求的开发进度信息，只找到了系统运行日志"
+
+【主题严格匹配】
+- 回答问题时，必须严格匹配问题中提到的**具体主题/功能名称**
+- 例如：问"代理模式计算"时，不要引用"代付"、"代收"等其他功能的信息，即使它们看起来相似
+- 不同的功能模块（如：代理模式、代收、代付、结算等）是独立的，不能混淆
+- 优先查找"XX提测日期"、"XX冒烟通过日期"、"XX上线日期"等**正式进度记录**
+- 测试人员的每日进度汇报通常包含准确的里程碑日期
 
 回答：`, question, context)
 

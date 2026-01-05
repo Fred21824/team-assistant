@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"team-assistant/internal/model"
@@ -34,6 +35,7 @@ type HybridProcessor struct {
 	datasetID        string            // Dify 知识库 ID
 	conversationMap  map[string]string // 用户对话 ID 映射 (userID -> conversationID)
 	contextMap       map[string]*ConversationContext // 用户对话上下文 (userID -> context)
+	mu               sync.RWMutex      // 保护 conversationMap 和 contextMap 的并发访问
 }
 
 // NewHybridProcessor 创建混合处理器
@@ -118,7 +120,9 @@ func (hp *HybridProcessor) processWithDify(ctx context.Context, userID, query st
 	}
 
 	// 获取对话 ID（支持多轮对话）
+	hp.mu.RLock()
 	conversationID := hp.conversationMap[userID]
+	hp.mu.RUnlock()
 
 	// 构建 Dify 请求
 	req := &dify.ChatRequest{
@@ -146,7 +150,9 @@ func (hp *HybridProcessor) processWithDify(ctx context.Context, userID, query st
 
 	// 保存对话 ID 用于多轮对话
 	if resp.ConversationID != "" {
+		hp.mu.Lock()
 		hp.conversationMap[userID] = resp.ConversationID
+		hp.mu.Unlock()
 	}
 
 	return resp.Answer, nil
@@ -154,8 +160,10 @@ func (hp *HybridProcessor) processWithDify(ctx context.Context, userID, query st
 
 // ClearConversation 清除用户的对话历史
 func (hp *HybridProcessor) ClearConversation(userID string) {
+	hp.mu.Lock()
 	delete(hp.conversationMap, userID)
 	delete(hp.contextMap, userID)
+	hp.mu.Unlock()
 }
 
 // isFollowUpQuestion 判断是否是追问（如"再看看"、"你再想想"）
@@ -184,14 +192,19 @@ func (hp *HybridProcessor) isFollowUpQuestion(query string) bool {
 // getOrRestoreContext 获取或恢复对话上下文
 // 如果是追问且有上下文，返回合并后的问题
 func (hp *HybridProcessor) getOrRestoreContext(userID, query string) (string, *ConversationContext) {
+	hp.mu.RLock()
 	ctx, exists := hp.contextMap[userID]
+	hp.mu.RUnlock()
+
 	if !exists || ctx == nil {
 		return query, nil
 	}
 
 	// 检查上下文是否过期（5分钟内有效）
 	if time.Since(ctx.LastTimestamp) > 5*time.Minute {
+		hp.mu.Lock()
 		delete(hp.contextMap, userID)
+		hp.mu.Unlock()
 		return query, nil
 	}
 
@@ -244,12 +257,14 @@ func (hp *HybridProcessor) mergeWithContext(followUp string, ctx *ConversationCo
 
 // saveContext 保存对话上下文
 func (hp *HybridProcessor) saveContext(userID string, query string, parsed *llm.ParsedQuery, chatID string) {
+	hp.mu.Lock()
 	hp.contextMap[userID] = &ConversationContext{
 		LastQuery:     query,
 		LastParsed:    parsed,
 		LastChatID:    chatID,
 		LastTimestamp: time.Now(),
 	}
+	hp.mu.Unlock()
 }
 
 // processWithNativeLLM 使用原生 LLM 处理

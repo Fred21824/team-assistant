@@ -49,6 +49,18 @@ func (h *LarkWebhookHandler) SetMessageSyncer(syncer MessageSyncer) {
 	h.msgSyncer = syncer
 }
 
+// safeGo 安全地启动一个 goroutine，捕获 panic 防止程序崩溃
+func safeGo(fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC] Goroutine panic recovered: %v", r)
+			}
+		}()
+		fn()
+	}()
+}
+
 // Handle 处理飞书事件
 func (h *LarkWebhookHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
@@ -139,7 +151,7 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 
 	// 存储所有消息用于后续搜索（仅群聊消息）
 	if event.Message.ChatType == "group" {
-		go h.storeMessage(&event, content)
+		safeGo(func() { h.storeMessage(&event, content) })
 	}
 
 	// 私聊消息直接处理命令
@@ -149,10 +161,10 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 			log.Printf("Received private message: %s", content)
 			// 检查私聊权限
 			if !h.checkPrivateChatPermission(&event) {
-				go h.replyNoPrivateChatPermission(&event)
+				safeGo(func() { h.replyNoPrivateChatPermission(&event) })
 				return
 			}
-			go h.handlePrivateCommand(&event, content)
+			safeGo(func() { h.handlePrivateCommand(&event, content) })
 		}
 		return
 	}
@@ -169,7 +181,7 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 
 	// 检查群聊成员数权限
 	if !h.checkGroupPermission(&event) {
-		go h.replyNoGroupPermission(&event)
+		safeGo(func() { h.replyNoGroupPermission(&event) })
 		return
 	}
 
@@ -190,7 +202,7 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 	log.Printf("Received bot message: %s", content)
 
 	// 处理用户查询
-	go h.processQuery(event.Message.ChatID, event.Message.MessageID, content)
+	safeGo(func() { h.processQuery(event.Message.ChatID, event.Message.MessageID, content) })
 }
 
 // getUserName 获取用户名（带缓存）

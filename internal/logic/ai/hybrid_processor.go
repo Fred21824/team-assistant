@@ -196,20 +196,40 @@ func (hp *HybridProcessor) isFollowUpQuestion(query string) bool {
 }
 
 // isLikelyFollowUp 判断是否可能是追问（结合上下文判断）
-// 短查询 + 有上下文 + 查询内容与上次回答相关 → 很可能是追问
+// 必须同时满足：短查询 + 有上下文 + 查询内容与上次主题相关
 func (hp *HybridProcessor) isLikelyFollowUp(query string, prevContext *ConversationContext) bool {
 	if prevContext == nil || prevContext.LastAnswer == "" {
 		return false
 	}
 
-	// 短查询（小于15个字符）很可能是追问
 	queryLen := len([]rune(query))
-	if queryLen <= 15 {
+
+	// 只有非常短的查询（小于8个字符）才可能是追问
+	// 例如："呢？"、"还有吗"、"其他的呢"
+	if queryLen <= 8 {
 		return true
 	}
 
-	// 查询中包含"的"且很短，很可能是追问（如"bx7的没有吗"）
-	if queryLen <= 20 && strings.Contains(query, "的") {
+	// 如果查询包含明显的新主题词，不是追问
+	// 检测是否有独立的主题（不是"的xxx"这种从句）
+	newTopicPatterns := []string{
+		"代理", "模式", "需求", "功能", "项目", "系统",
+		"接口", "服务", "数据", "用户", "订单", "支付",
+		"站点", "商户", "渠道",
+	}
+	hasNewTopic := false
+	for _, pattern := range newTopicPatterns {
+		if strings.Contains(query, pattern) && !strings.Contains(prevContext.LastQuery, pattern) {
+			hasNewTopic = true
+			break
+		}
+	}
+	if hasNewTopic {
+		return false
+	}
+
+	// 查询中以"的"结尾+问号，且很短，可能是补充追问（如"bx7的呢？"）
+	if queryLen <= 12 && strings.HasSuffix(strings.TrimSuffix(query, "？"), "的呢") {
 		return true
 	}
 
@@ -759,10 +779,8 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 		log.Printf("handleQA: time filter %s ~ %s", startTime.Format("2006-01-02"), endTime.Format("2006-01-02"))
 	}
 
-	// 检测是否是询问人员角色的问题（如"后端是谁"、"产品是谁"）
-	if hp.isRoleQuery(query) {
-		return hp.handleRoleQuery(ctx, query, chatID)
-	}
+	// 注意：不再单独处理角色查询（如"后端是谁"），统一走搜索+LLM流程
+	// 这样可以正确处理带条件的查询，如"XX项目的后端是谁"、"XX功能什么时候提测"
 
 	// 检测是否是询问某人做了什么的问题
 	if hp.isPersonActivityQuery(query) {
@@ -1055,140 +1073,6 @@ func (hp *HybridProcessor) buildExpandedQuery(originalQuery string, prevContext 
 	return "所有站点的告警"
 }
 
-// isRoleQuery 检测是否是询问人员角色的问题
-// 例如："后端是谁"、"产品经理有哪些人"
-// 但不匹配："归集是谁做的"、"XX功能是谁做的"
-func (hp *HybridProcessor) isRoleQuery(query string) bool {
-	// 排除模式：如果问的是"XXX是谁做的"，这不是角色查询
-	excludePatterns := []string{"是谁做的", "谁做的", "谁开发的", "谁写的", "谁负责的", "谁实现的"}
-	for _, p := range excludePatterns {
-		if strings.Contains(query, p) {
-			return false
-		}
-	}
-
-	// 角色关键词（必须出现）
-	roleKeywords := []string{"后端", "前端", "产品", "测试", "运维", "设计", "客户端", "ios", "android"}
-	// 疑问词
-	questionWords := []string{"是谁", "有谁", "哪些人", "谁是", "有哪些"}
-
-	queryLower := strings.ToLower(query)
-	hasRole := false
-	hasQuestion := false
-
-	for _, r := range roleKeywords {
-		if strings.Contains(queryLower, r) {
-			hasRole = true
-			break
-		}
-	}
-
-	for _, q := range questionWords {
-		if strings.Contains(query, q) {
-			hasQuestion = true
-			break
-		}
-	}
-
-	// 必须同时包含角色关键词和疑问词
-	return hasRole && hasQuestion
-}
-
-// handleRoleQuery 处理人员角色查询
-func (hp *HybridProcessor) handleRoleQuery(ctx context.Context, query, chatID string) (string, error) {
-	// 从 sender_name 中提取角色信息
-	senderNames, err := hp.svcCtx.MessageModel.GetDistinctSenders(ctx, chatID)
-	if err != nil {
-		log.Printf("Failed to get distinct senders: %v", err)
-		return "获取人员信息失败，请稍后重试。", nil
-	}
-
-	if len(senderNames) == 0 {
-		return "暂无人员信息。", nil
-	}
-
-	// 按角色分类
-	roleMap := make(map[string][]string)
-	for _, name := range senderNames {
-		role := hp.extractRole(name)
-		if role != "" {
-			roleMap[role] = append(roleMap[role], name)
-		}
-	}
-
-	// 检测用户问的是哪个角色
-	queryLower := strings.ToLower(query)
-	var targetRole string
-	roleKeywords := map[string][]string{
-		"后端":  {"后端", "backend", "服务端"},
-		"前端":  {"前端", "frontend", "web"},
-		"产品":  {"产品", "pm", "product"},
-		"测试":  {"测试", "qa", "test"},
-		"运维":  {"运维", "ops", "devops"},
-		"设计":  {"设计", "ui", "ux"},
-		"客户端": {"客户端", "ios", "android", "mobile"},
-	}
-
-	for role, keywords := range roleKeywords {
-		for _, kw := range keywords {
-			if strings.Contains(queryLower, kw) {
-				targetRole = role
-				break
-			}
-		}
-		if targetRole != "" {
-			break
-		}
-	}
-
-	var sb strings.Builder
-	if targetRole != "" {
-		// 回答特定角色
-		members := roleMap[targetRole]
-		if len(members) == 0 {
-			return fmt.Sprintf("聊天记录中没有找到%s相关人员。", targetRole), nil
-		}
-		sb.WriteString(fmt.Sprintf("👥 %s人员（%d人）：\n", targetRole, len(members)))
-		for _, m := range members {
-			sb.WriteString(fmt.Sprintf("• %s\n", m))
-		}
-	} else {
-		// 列出所有角色
-		sb.WriteString("👥 群成员角色分布：\n\n")
-		for role, members := range roleMap {
-			sb.WriteString(fmt.Sprintf("**%s**（%d人）：%s\n", role, len(members), strings.Join(members, "、")))
-		}
-		if len(roleMap) == 0 {
-			sb.WriteString("群成员：" + strings.Join(senderNames, "、"))
-		}
-	}
-
-	return sb.String(), nil
-}
-
-// extractRole 从名字中提取角色
-func (hp *HybridProcessor) extractRole(name string) string {
-	nameLower := strings.ToLower(name)
-	rolePatterns := map[string][]string{
-		"后端":  {"后端", "backend", "服务端", "server"},
-		"前端":  {"前端", "frontend", "web"},
-		"产品":  {"产品", "pm", "product"},
-		"测试":  {"测试", "qa", "test"},
-		"运维":  {"运维", "ops", "devops", "sre"},
-		"设计":  {"设计", "ui", "ux", "design"},
-		"客户端": {"客户端", "ios", "android", "mobile"},
-	}
-
-	for role, patterns := range rolePatterns {
-		for _, p := range patterns {
-			if strings.Contains(nameLower, p) {
-				return role
-			}
-		}
-	}
-	return "其他"
-}
-
 // isPersonActivityQuery 检测是否是询问某人做了什么
 func (hp *HybridProcessor) isPersonActivityQuery(query string) bool {
 	activityPatterns := []string{"做了什么", "干了什么", "做什么", "在做什么", "负责什么", "做了啥"}
@@ -1285,6 +1169,11 @@ func (hp *HybridProcessor) answerWithContext(ctx context.Context, question, cont
 2. 禁止编造任何订单号、金额、时间等具体数据
 3. 如果记录中没有相关信息，必须回答"在提供的聊天记录中未找到相关信息"
 4. 引用信息时标注来源，如"根据[01-05 10:30]的消息..."
+
+【特别注意】
+- 如果问题是"XX需求/项目有哪些YY（角色）参与"，请从聊天记录中找出**讨论过该需求/项目的人**，而不是列出所有该角色的人
+- 发言人的名字格式通常是"姓名-角色"，如"张三-后端"、"李四-前端"
+- 只列出在相关讨论中**实际发言**的人
 
 回答：`, question, context)
 
@@ -1453,6 +1342,9 @@ func (hp *HybridProcessor) getTimeRange(tr llm.TimeRange) (time.Time, time.Time)
 		thisMonthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 		lastMonthStart := thisMonthStart.AddDate(0, -1, 0)
 		return lastMonthStart, thisMonthStart
+	case llm.TimeRangeRecentMonth:
+		// 最近30天（不是上个自然月）
+		return today.AddDate(0, 0, -30), now
 	default:
 		// 默认查询最近3年的消息（告警查询需要更大的时间范围）
 		return now.AddDate(-3, 0, 0), now

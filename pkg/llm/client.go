@@ -32,14 +32,15 @@ const (
 type TimeRange string
 
 const (
-	TimeRangeToday     TimeRange = "today"
-	TimeRangeYesterday TimeRange = "yesterday"
-	TimeRangeThisWeek  TimeRange = "this_week"
-	TimeRangeLastWeek  TimeRange = "last_week"
-	TimeRangeThisMonth TimeRange = "this_month"
-	TimeRangeLastMonth TimeRange = "last_month"
-	TimeRangeCustom    TimeRange = "custom"
-	TimeRangeAll       TimeRange = "all" // 全部历史（用于群历程查询）
+	TimeRangeToday       TimeRange = "today"
+	TimeRangeYesterday   TimeRange = "yesterday"
+	TimeRangeThisWeek    TimeRange = "this_week"
+	TimeRangeLastWeek    TimeRange = "last_week"
+	TimeRangeThisMonth   TimeRange = "this_month"
+	TimeRangeLastMonth   TimeRange = "last_month"
+	TimeRangeRecentMonth TimeRange = "recent_month" // 最近30天（不是上个自然月）
+	TimeRangeCustom      TimeRange = "custom"
+	TimeRangeAll         TimeRange = "all" // 全部历史（用于群历程查询）
 )
 
 // ParsedQuery 解析后的查询
@@ -261,7 +262,8 @@ func (c *Client) ParseUserQuery(ctx context.Context, query string) (*ParsedQuery
 - this_week: 本周（**仅当**用户明确说"本周"、"这周"时使用）
 - last_week: 上周（**仅当**用户明确说"上周"时使用）
 - this_month: 本月（**仅当**用户明确说"本月"、"这个月"时使用）
-- last_month: 上个月
+- last_month: 上个月（**仅当**用户明确说"上个月"、"上月"时使用，指上一个自然月）
+- recent_month: 最近一个月/最近30天（当用户说"最近一个月"、"近一个月"、"过去一个月"时使用）
 - custom: 只有用户明确指定了具体日期范围时才使用
 - all: 全部历史（当用户询问"历程"、"从一开始"、"所有历史"、"发展过程"时使用）
 - 空字符串: **默认值**，当用户没有明确指定时间范围时使用，系统会搜索全部历史

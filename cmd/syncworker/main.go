@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -89,8 +90,18 @@ func main() {
 		log.Println("RAG service initialized")
 	}
 
-	// 创建同步器池
+	// 创建同步器池（处理手动创建的同步任务）
 	pool := NewSyncPool(svcCtx, *workers, *interval)
+
+	// 创建定时增量同步调度器（处理配置的群自动同步）
+	var autoSyncer *AutoSyncScheduler
+	if cfg.AutoSync.Enabled && len(cfg.AutoSync.Chats) > 0 {
+		autoSyncer = NewAutoSyncScheduler(svcCtx, cfg.AutoSync.Chats)
+		autoSyncer.Start()
+		log.Printf("AutoSync enabled for %d chats", len(cfg.AutoSync.Chats))
+	} else {
+		log.Println("AutoSync disabled")
+	}
 
 	// 优雅关闭
 	sigChan := make(chan os.Signal, 1)
@@ -102,6 +113,9 @@ func main() {
 	<-sigChan
 	log.Println("Shutting down...")
 	pool.Stop()
+	if autoSyncer != nil {
+		autoSyncer.Stop()
+	}
 	log.Println("Sync worker stopped")
 }
 
@@ -260,4 +274,196 @@ func (p *SyncPool) claimTask(ctx context.Context) (*model.MessageSyncTask, error
 	}
 
 	return &task, nil
+}
+
+// ==================== AutoSyncScheduler ====================
+
+// AutoSyncScheduler 定时增量同步调度器
+type AutoSyncScheduler struct {
+	svcCtx   *svc.ServiceContext
+	chats    []config.AutoSyncChatConfig
+	stopChan chan struct{}
+	wg       sync.WaitGroup
+}
+
+// NewAutoSyncScheduler 创建定时增量同步调度器
+func NewAutoSyncScheduler(svcCtx *svc.ServiceContext, chats []config.AutoSyncChatConfig) *AutoSyncScheduler {
+	return &AutoSyncScheduler{
+		svcCtx:   svcCtx,
+		chats:    chats,
+		stopChan: make(chan struct{}),
+	}
+}
+
+// Start 启动调度器
+func (s *AutoSyncScheduler) Start() {
+	for _, chatCfg := range s.chats {
+		s.wg.Add(1)
+		go s.runChatSync(chatCfg)
+	}
+}
+
+// Stop 停止调度器
+func (s *AutoSyncScheduler) Stop() {
+	close(s.stopChan)
+	s.wg.Wait()
+	log.Println("AutoSyncScheduler stopped")
+}
+
+// runChatSync 运行单个群的定时同步
+func (s *AutoSyncScheduler) runChatSync(cfg config.AutoSyncChatConfig) {
+	defer s.wg.Done()
+
+	// 最小间隔 10 秒
+	interval := cfg.Interval
+	if interval < 10 {
+		interval = 10
+	}
+
+	// 默认回溯 10 分钟
+	lookback := cfg.LookbackMinutes
+	if lookback <= 0 {
+		lookback = 10
+	}
+
+	ticker := time.NewTicker(time.Duration(interval) * time.Second)
+	defer ticker.Stop()
+
+	chatName := cfg.Name
+	if chatName == "" {
+		chatName = cfg.ChatID
+	}
+
+	log.Printf("AutoSync [%s]: started, interval=%ds, lookback=%dm", chatName, interval, lookback)
+
+	// 立即执行一次
+	s.syncChatIncremental(cfg, chatName, lookback)
+
+	for {
+		select {
+		case <-s.stopChan:
+			log.Printf("AutoSync [%s]: stopping", chatName)
+			return
+		case <-ticker.C:
+			s.syncChatIncremental(cfg, chatName, lookback)
+		}
+	}
+}
+
+// syncChatIncremental 增量同步单个群的消息
+func (s *AutoSyncScheduler) syncChatIncremental(cfg config.AutoSyncChatConfig, chatName string, lookbackMinutes int) {
+	ctx := context.Background()
+
+	// 计算时间范围
+	endTime := time.Now()
+	startTime := endTime.Add(-time.Duration(lookbackMinutes) * time.Minute)
+
+	// 转换为飞书 API 需要的时间戳格式（毫秒）
+	startTimeStr := formatLarkTimestamp(startTime)
+	endTimeStr := formatLarkTimestamp(endTime)
+
+	pageToken := ""
+	totalSynced := 0
+	maxPages := 10 // 最多翻页 10 次，防止卡死
+
+	syncer := collector.NewMessageSyncer(s.svcCtx)
+
+	for page := 0; page < maxPages; page++ {
+		// 拉取消息
+		resp, err := s.svcCtx.LarkClient.GetChatHistory(ctx, cfg.ChatID, startTimeStr, endTimeStr, 50, pageToken)
+		if err != nil {
+			log.Printf("AutoSync [%s]: failed to get history: %v", chatName, err)
+			return
+		}
+
+		if len(resp.Data.Items) == 0 {
+			break
+		}
+
+		// 处理消息
+		newCount := s.processMessages(ctx, syncer, resp.Data.Items, cfg.ChatID, chatName)
+		totalSynced += newCount
+
+		// 检查是否有更多
+		if !resp.Data.HasMore || resp.Data.PageToken == "" {
+			break
+		}
+		pageToken = resp.Data.PageToken
+	}
+
+	if totalSynced > 0 {
+		log.Printf("AutoSync [%s]: synced %d new messages", chatName, totalSynced)
+	}
+}
+
+// processMessages 处理消息列表，返回新增消息数
+func (s *AutoSyncScheduler) processMessages(ctx context.Context, syncer *collector.MessageSyncer, items []*lark.MessageItem, chatID, chatName string) int {
+	newCount := 0
+
+	var vectorMsgs []service.MessageVector
+
+	for _, item := range items {
+		if item.Deleted {
+			continue
+		}
+
+		// 检查消息是否已存在
+		exists, err := s.messageExists(ctx, item.MessageID)
+		if err != nil {
+			log.Printf("AutoSync: failed to check message existence: %v", err)
+			continue
+		}
+		if exists {
+			continue
+		}
+
+		// 转换并存储消息
+		msg := syncer.ConvertToMessage(ctx, item)
+		if err := s.svcCtx.MessageModel.Insert(ctx, msg); err != nil {
+			// INSERT IGNORE 不会报重复键错误，这里可能是其他错误
+			log.Printf("AutoSync: failed to insert message %s: %v", item.MessageID, err)
+			continue
+		}
+
+		newCount++
+
+		// 收集向量数据
+		if msg.Content.Valid && msg.Content.String != "" {
+			vectorMsgs = append(vectorMsgs, service.MessageVector{
+				MessageID:  msg.MessageID,
+				ChatID:     msg.ChatID,
+				ChatName:   chatName,
+				SenderID:   msg.SenderID.String,
+				SenderName: msg.SenderName.String,
+				Content:    msg.Content.String,
+				CreatedAt:  msg.CreatedAt,
+			})
+		}
+	}
+
+	// 批量索引到向量数据库
+	if len(vectorMsgs) > 0 && s.svcCtx.Services.RAG != nil && s.svcCtx.Services.RAG.IsEnabled() {
+		if err := s.svcCtx.Services.RAG.IndexMessages(ctx, vectorMsgs); err != nil {
+			log.Printf("AutoSync: failed to index messages: %v", err)
+		}
+	}
+
+	return newCount
+}
+
+// messageExists 检查消息是否已存在
+func (s *AutoSyncScheduler) messageExists(ctx context.Context, messageID string) (bool, error) {
+	var count int
+	err := s.svcCtx.DB.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM chat_messages WHERE message_id = ?",
+		messageID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// formatLarkTimestamp 格式化为飞书时间戳（毫秒）
+func formatLarkTimestamp(t time.Time) string {
+	return strconv.FormatInt(t.UnixMilli(), 10)
 }

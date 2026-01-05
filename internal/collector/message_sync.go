@@ -165,7 +165,7 @@ func (s *MessageSyncer) syncMessages(ctx context.Context, task *model.MessageSyn
 			continue
 		}
 
-		msg := s.convertToMessage(ctx, item)
+		msg := s.ConvertToMessage(ctx, item)
 		if err := s.svcCtx.MessageModel.Insert(ctx, msg); err != nil {
 			log.Printf("Failed to insert message %s: %v", item.MessageID, err)
 		} else {
@@ -258,8 +258,8 @@ func (s *MessageSyncer) getUserName(ctx context.Context, openID string) string {
 	return ""
 }
 
-// convertToMessage 转换消息格式
-func (s *MessageSyncer) convertToMessage(ctx context.Context, item *lark.MessageItem) *model.ChatMessage {
+// ConvertToMessage 转换消息格式（公开方法，供外部调用）
+func (s *MessageSyncer) ConvertToMessage(ctx context.Context, item *lark.MessageItem) *model.ChatMessage {
 	// 解析时间戳
 	var createTime time.Time
 	if ts, err := strconv.ParseInt(item.CreateTime, 10, 64); err == nil {

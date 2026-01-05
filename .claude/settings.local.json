@@ -63,7 +63,19 @@
       "Bash(# 检查 Qdrant 向量数据库的消息数量 curl -s \"\"http://18.166.182.134:6333/collections/lark_messages\"\" | python3 -m json.tool)",
       "Bash(grep:*)",
       "Bash(./scripts/deploy.sh:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(__NEW_LINE__ echo -e \"\\\\n=== 3. 多维表格列表 ===\")",
+      "Bash(__NEW_LINE__ echo -e \"\\\\n【2. 获取工作表列表】\")",
+      "Bash(SERVER_USER=\"ubuntu\")",
+      "Bash(SERVER_HOST=\"ec2-18-166-182-134.ap-east-1.compute.amazonaws.com\":*)",
+      "Bash(__NEW_LINE__ ssh -i \"$SSH_KEY\" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR )",
+      "Bash(\"$SERVER_USER@$SERVER_HOST\" \"sudo journalctl -u syncworker -n 30 --no-pager\")",
+      "Bash(\"$SERVER_USER@$SERVER_HOST\" \"tail -50 /opt/team-assistant/logs/syncworker.log\")",
+      "Bash(\"$SERVER_USER@$SERVER_HOST\" \"tail -30 /opt/team-assistant/logs/syncworker.log\")",
+      "Bash(__NEW_LINE__ echo -e \"\\\\n=== 月报表 \\(前10行\\) ===\")",
+      "Bash(RANGE=\"1876QF%21A1%3AJ10\")",
+      "Bash(\"$SERVER_USER@$SERVER_HOST\" \"tail -80 /opt/team-assistant/logs/syncworker.log | grep -E ''\\(AutoSync|Error|error|failed\\)''\")",
+      "Bash(\"$SERVER_USER@$SERVER_HOST\" \"tail -20 /opt/team-assistant/logs/syncworker.log\")"
     ]
   }
 }

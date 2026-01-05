@@ -11,6 +11,7 @@ type Config struct {
 	Dify     DifyConfig     `yaml:"Dify"`
 	VectorDB VectorDBConfig `yaml:"VectorDB"`
 	Bitable  BitableConfig  `yaml:"Bitable"`
+	AutoSync AutoSyncConfig `yaml:"AutoSync"`
 }
 
 // ServerConfig 服务器配置
@@ -87,4 +88,18 @@ type BitableConfig struct {
 	Enabled  bool   `yaml:"Enabled"`  // 是否启用 Bitable 查询
 	AppToken string `yaml:"AppToken"` // 多维表格 App Token
 	TableID  string `yaml:"TableID"`  // 表格 ID
+}
+
+// AutoSyncConfig 定时增量同步配置
+type AutoSyncConfig struct {
+	Enabled bool                 `yaml:"Enabled"` // 是否启用定时同步
+	Chats   []AutoSyncChatConfig `yaml:"Chats"`   // 需要同步的群列表
+}
+
+// AutoSyncChatConfig 单个群的同步配置
+type AutoSyncChatConfig struct {
+	ChatID          string `yaml:"ChatID"`          // 群ID
+	Name            string `yaml:"Name"`            // 群名（仅用于日志）
+	Interval        int    `yaml:"Interval"`        // 同步间隔（秒），最小10秒
+	LookbackMinutes int    `yaml:"LookbackMinutes"` // 每次拉取最近多少分钟的消息
 }

@@ -20,6 +20,7 @@ import (
 // ConversationContext 对话上下文
 type ConversationContext struct {
 	LastQuery     string           // 上一个问题
+	LastAnswer    string           // 上一次的回答（用于追问时参考）
 	LastParsed    *llm.ParsedQuery // 上一次解析结果
 	LastChatID    string           // 上一次使用的 chatID
 	LastTimestamp time.Time        // 上一次交互时间
@@ -178,6 +179,10 @@ func (hp *HybridProcessor) isFollowUpQuestion(query string) bool {
 		// 简短请求类追问
 		"给我个", "给一个", "来一个", "来个", "发一个", "发个",
 		"那就给", "直接给", "就给我",
+		// 补充追问模式（"xxx的没有吗"、"那xxx呢"、"xxx呢"）
+		"没有吗", "有没有", "有吗", "呢?", "呢？",
+		"那个呢", "这个呢", "其他的呢", "别的呢",
+		"还有吗", "还有没有", "就这些吗", "只有这些",
 	}
 
 	queryLower := strings.ToLower(query)
@@ -186,6 +191,27 @@ func (hp *HybridProcessor) isFollowUpQuestion(query string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+// isLikelyFollowUp 判断是否可能是追问（结合上下文判断）
+// 短查询 + 有上下文 + 查询内容与上次回答相关 → 很可能是追问
+func (hp *HybridProcessor) isLikelyFollowUp(query string, prevContext *ConversationContext) bool {
+	if prevContext == nil || prevContext.LastAnswer == "" {
+		return false
+	}
+
+	// 短查询（小于15个字符）很可能是追问
+	queryLen := len([]rune(query))
+	if queryLen <= 15 {
+		return true
+	}
+
+	// 查询中包含"的"且很短，很可能是追问（如"bx7的没有吗"）
+	if queryLen <= 20 && strings.Contains(query, "的") {
+		return true
+	}
+
 	return false
 }
 
@@ -267,6 +293,19 @@ func (hp *HybridProcessor) saveContext(userID string, query string, parsed *llm.
 	hp.mu.Unlock()
 }
 
+// saveContextWithAnswer 保存对话上下文（包含回答）
+func (hp *HybridProcessor) saveContextWithAnswer(userID string, query string, answer string, parsed *llm.ParsedQuery, chatID string) {
+	hp.mu.Lock()
+	hp.contextMap[userID] = &ConversationContext{
+		LastQuery:     query,
+		LastAnswer:    answer,
+		LastParsed:    parsed,
+		LastChatID:    chatID,
+		LastTimestamp: time.Now(),
+	}
+	hp.mu.Unlock()
+}
+
 // processWithNativeLLM 使用原生 LLM 处理
 // currentChatID 是当前会话所在的群ID，用于限定搜索范围
 func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChatID, query string) (string, error) {
@@ -276,6 +315,22 @@ func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChat
 	// 检查是否是追问，尝试恢复上下文
 	originalQuery := query
 	restoredQuery, prevContext := hp.getOrRestoreContext(userID, query)
+
+	// 判断是否是追问：明确的追问模式 或 可能的追问（短查询+有上下文）
+	isFollowUp := hp.isFollowUpQuestion(originalQuery) || hp.isLikelyFollowUp(originalQuery, prevContext)
+
+	// 如果是追问且有上一轮回答，直接让 LLM 从上一轮回答中提取信息
+	if isFollowUp && prevContext != nil && prevContext.LastAnswer != "" {
+		log.Printf("Follow-up question detected (query: %s), answering from previous context", originalQuery)
+		answer, err := hp.answerFollowUpFromContext(ctx, originalQuery, prevContext)
+		if err == nil && answer != "" {
+			// 保存本次回答到上下文
+			hp.saveContextWithAnswer(userID, originalQuery, answer, prevContext.LastParsed, prevContext.LastChatID)
+			return answer, nil
+		}
+		log.Printf("Failed to answer from context: %v, falling back to normal processing", err)
+	}
+
 	if restoredQuery != query {
 		log.Printf("Restored query from '%s' to '%s'", query, restoredQuery)
 		query = restoredQuery
@@ -298,32 +353,61 @@ func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChat
 	log.Printf("Parsed query: intent=%s, time_range=%s, users=%v, group=%s, currentChat=%s",
 		parsed.Intent, parsed.TimeRange, parsed.TargetUsers, parsed.TargetGroup, currentChatID)
 
-	// 保存对话上下文（只保存有意义的查询）
-	if !hp.isFollowUpQuestion(originalQuery) || len(originalQuery) > 10 {
-		chatID := hp.getSearchChatID(currentChatID, parsed.TargetGroup, ctx)
-		hp.saveContext(userID, query, parsed, chatID)
-	}
-
 	// 根据意图处理，传递当前群ID
+	var answer string
 	switch parsed.Intent {
 	case llm.IntentSiteQuery:
-		return hp.handleSiteQueryByLLM(ctx, parsed)
+		answer, err = hp.handleSiteQueryByLLM(ctx, parsed)
 	case llm.IntentGroupTimeline:
-		return hp.handleGroupTimeline(ctx, parsed, currentChatID)
+		answer, err = hp.handleGroupTimeline(ctx, parsed, currentChatID)
 	case llm.IntentQueryWorkload, llm.IntentQueryCommits:
-		return hp.handleWorkloadQuery(ctx, parsed)
+		answer, err = hp.handleWorkloadQuery(ctx, parsed)
 	case llm.IntentSearchMessage:
-		return hp.handleMessageSearch(ctx, parsed, currentChatID)
+		answer, err = hp.handleMessageSearch(ctx, parsed, currentChatID)
 	case llm.IntentSummarize:
-		return hp.handleSummarize(ctx, parsed, currentChatID)
+		answer, err = hp.handleSummarize(ctx, parsed, currentChatID)
 	case llm.IntentQA:
-		return hp.handleQA(ctx, parsed, currentChatID)
+		answer, err = hp.handleQA(ctx, parsed, currentChatID)
 	case llm.IntentHelp:
 		return hp.getHelpMessage(), nil
 	default:
 		// 对于未知意图，尝试作为问答处理
-		return hp.handleQA(ctx, parsed, currentChatID)
+		answer, err = hp.handleQA(ctx, parsed, currentChatID)
 	}
+
+	// 保存对话上下文（包含回答，用于追问）
+	if err == nil && answer != "" {
+		chatID := hp.getSearchChatID(currentChatID, parsed.TargetGroup, ctx)
+		hp.saveContextWithAnswer(userID, query, answer, parsed, chatID)
+	}
+
+	return answer, err
+}
+
+// answerFollowUpFromContext 从上一轮回答中提取信息回答追问
+func (hp *HybridProcessor) answerFollowUpFromContext(ctx context.Context, followUpQuery string, prevContext *ConversationContext) (string, error) {
+	if hp.llmClient == nil {
+		return "", fmt.Errorf("LLM client not available")
+	}
+
+	// 限制上一轮回答的长度
+	lastAnswer := prevContext.LastAnswer
+	if len(lastAnswer) > 4000 {
+		lastAnswer = lastAnswer[:4000] + "...(已截断)"
+	}
+
+	prompt := fmt.Sprintf(`用户之前问了："%s"
+
+我的回答是：
+%s
+
+现在用户追问："%s"
+
+请根据上面的回答内容，直接提取相关信息回答用户的追问。
+如果上面的回答中没有相关信息，请明确说"上述回答中没有找到相关信息"。
+回答要简洁直接。`, prevContext.LastQuery, lastAnswer, followUpQuery)
+
+	return hp.llmClient.GenerateResponse(ctx, prompt, nil)
 }
 
 // ContextData 上下文数据

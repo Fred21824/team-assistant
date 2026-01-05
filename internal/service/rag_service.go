@@ -369,12 +369,15 @@ func (s *RAGService) HybridSearch(ctx context.Context, query string, keywords []
 		return nil, nil
 	}
 
-	// 1. 同义词扩展
+	// 1. 同义词扩展（静态规则 + 语义扩展）
 	expandedKeywords := keywords
 	if opts.ExpandSynonyms && len(keywords) > 0 {
-		expander := NewSynonymExpander()
-		expandedKeywords = expander.Expand(keywords)
-		log.Printf("[RAG] Keywords expanded: %v -> %v", keywords, expandedKeywords)
+		// 使用语义同义词扩展器（结合静态规则和 embedding 相似度）
+		semanticExpander := NewSemanticSynonymExpander(s.embeddingClient)
+		expandedKeywords = semanticExpander.ExpandWithSemantics(ctx, keywords)
+		if len(expandedKeywords) > len(keywords) {
+			log.Printf("[RAG] Keywords expanded (semantic): %v -> %v", keywords, expandedKeywords)
+		}
 	}
 
 	// 2. 动态调整 limit

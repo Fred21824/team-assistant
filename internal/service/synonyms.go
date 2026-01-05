@@ -1,13 +1,268 @@
 package service
 
 import (
+	"context"
+	"log"
+	"math"
 	"strings"
+	"time"
 	"unicode"
+
+	"team-assistant/pkg/embedding"
 )
 
 // SynonymExpander 同义词扩展器
 type SynonymExpander struct {
-	synonymMap map[string][]string
+	synonymMap      map[string][]string
+	embeddingClient *embedding.OllamaClient // 用于语义相似度计算
+}
+
+// SemanticSynonymExpander 基于 Embedding 的语义同义词扩展器
+type SemanticSynonymExpander struct {
+	embeddingClient    *embedding.OllamaClient
+	similarityThreshold float64 // 相似度阈值，默认 0.75
+}
+
+// NewSemanticSynonymExpander 创建语义同义词扩展器
+func NewSemanticSynonymExpander(embeddingClient *embedding.OllamaClient) *SemanticSynonymExpander {
+	return &SemanticSynonymExpander{
+		embeddingClient:    embeddingClient,
+		similarityThreshold: 0.75,
+	}
+}
+
+// SetThreshold 设置相似度阈值
+func (e *SemanticSynonymExpander) SetThreshold(threshold float64) {
+	e.similarityThreshold = threshold
+}
+
+// AreSynonyms 判断两个词是否是语义同义词
+func (e *SemanticSynonymExpander) AreSynonyms(ctx context.Context, word1, word2 string) (bool, float64) {
+	if e.embeddingClient == nil {
+		return false, 0
+	}
+
+	// 获取两个词的 embedding
+	embeddings, err := e.embeddingClient.GetEmbeddings(ctx, []string{word1, word2})
+	if err != nil || len(embeddings) != 2 {
+		return false, 0
+	}
+
+	// 计算余弦相似度
+	similarity := cosineSimilarity(embeddings[0], embeddings[1])
+	return similarity >= e.similarityThreshold, similarity
+}
+
+// FindSynonymsInContent 从内容中找出与关键词语义相似的词
+// 用于：当搜索"签名错误"时，能匹配到包含"签名验证失败"的内容
+func (e *SemanticSynonymExpander) FindSynonymsInContent(ctx context.Context, keyword string, content string) ([]string, error) {
+	if e.embeddingClient == nil {
+		return nil, nil
+	}
+
+	// 从内容中提取候选词（简单分词）
+	candidates := extractCandidateTerms(content)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	// 获取关键词的 embedding
+	keywordEmb, err := e.embeddingClient.GetEmbeddings(ctx, []string{keyword})
+	if err != nil || len(keywordEmb) == 0 {
+		return nil, err
+	}
+
+	// 批量获取候选词的 embedding
+	candidateEmbs, err := e.embeddingClient.GetEmbeddings(ctx, candidates)
+	if err != nil {
+		return nil, err
+	}
+
+	// 找出相似度超过阈值的词
+	var synonyms []string
+	for i, emb := range candidateEmbs {
+		similarity := cosineSimilarity(keywordEmb[0], emb)
+		if similarity >= e.similarityThreshold && candidates[i] != keyword {
+			synonyms = append(synonyms, candidates[i])
+		}
+	}
+
+	return synonyms, nil
+}
+
+// ExpandWithSemantics 语义扩展关键词（结合静态规则和动态语义）
+func (e *SemanticSynonymExpander) ExpandWithSemantics(ctx context.Context, keywords []string) []string {
+	// 先用静态规则扩展
+	staticExpander := NewSynonymExpander()
+	expanded := staticExpander.Expand(keywords)
+
+	// 如果没有 embedding 客户端，只返回静态扩展结果
+	if e.embeddingClient == nil {
+		return expanded
+	}
+
+	// 语义扩展：为每个关键词生成相似的变体
+	// 这里使用一个预定义的常见变体模式
+	variants := generateSemanticVariants(keywords)
+	if len(variants) == 0 {
+		return expanded
+	}
+
+	// 批量计算相似度
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	allTerms := append(keywords, variants...)
+	embeddings, err := e.embeddingClient.GetEmbeddings(ctx, allTerms)
+	if err != nil {
+		log.Printf("Semantic expansion failed: %v", err)
+		return expanded
+	}
+
+	// 找出与原关键词相似的变体
+	keywordCount := len(keywords)
+	for i := 0; i < keywordCount; i++ {
+		for j := keywordCount; j < len(embeddings); j++ {
+			similarity := cosineSimilarity(embeddings[i], embeddings[j])
+			if similarity >= e.similarityThreshold {
+				variant := allTerms[j]
+				// 去重添加
+				found := false
+				for _, ex := range expanded {
+					if ex == variant {
+						found = true
+						break
+					}
+				}
+				if !found {
+					expanded = append(expanded, variant)
+					log.Printf("[Semantic] Found synonym: %s -> %s (similarity: %.2f)", keywords[i], variant, similarity)
+				}
+			}
+		}
+	}
+
+	return expanded
+}
+
+// generateSemanticVariants 生成关键词的语义变体
+func generateSemanticVariants(keywords []string) []string {
+	// 常见的语义变体模式
+	patterns := map[string][]string{
+		"错误":  {"失败", "异常", "问题", "故障"},
+		"失败":  {"错误", "异常", "问题", "故障"},
+		"验证":  {"校验", "检验", "核验"},
+		"签名":  {"sign", "signature"},
+		"配置":  {"设置", "config"},
+		"支付":  {"付款", "交易"},
+		"订单":  {"order", "单号"},
+		"超时":  {"timeout", "延迟"},
+		"异常":  {"exception", "错误", "问题"},
+	}
+
+	var variants []string
+	seen := make(map[string]bool)
+
+	for _, kw := range keywords {
+		// 拆分组合词并生成变体
+		// 例如 "签名错误" -> ["签名失败", "签名异常", "签名验证失败"]
+		for pattern, alternatives := range patterns {
+			if strings.Contains(kw, pattern) {
+				for _, alt := range alternatives {
+					variant := strings.Replace(kw, pattern, alt, 1)
+					if !seen[variant] && variant != kw {
+						seen[variant] = true
+						variants = append(variants, variant)
+					}
+				}
+			}
+		}
+
+		// 添加组合变体
+		// "签名错误" -> "签名验证失败"
+		if strings.Contains(kw, "错误") {
+			variant := strings.Replace(kw, "错误", "验证失败", 1)
+			if !seen[variant] {
+				seen[variant] = true
+				variants = append(variants, variant)
+			}
+		}
+		if strings.Contains(kw, "失败") && !strings.Contains(kw, "验证") {
+			variant := strings.Replace(kw, "失败", "验证失败", 1)
+			if !seen[variant] {
+				seen[variant] = true
+				variants = append(variants, variant)
+			}
+		}
+	}
+
+	return variants
+}
+
+// extractCandidateTerms 从内容中提取候选词组
+func extractCandidateTerms(content string) []string {
+	// 简单实现：按标点和空格分割，然后提取2-6字的词组
+	var terms []string
+	seen := make(map[string]bool)
+
+	// 分割成句子
+	sentences := strings.FieldsFunc(content, func(r rune) bool {
+		return r == '。' || r == '，' || r == '、' || r == '\n' || r == ' ' || r == '!' || r == '?'
+	})
+
+	for _, sentence := range sentences {
+		runes := []rune(strings.TrimSpace(sentence))
+		// 提取不同长度的子串作为候选词
+		for length := 2; length <= 6 && length <= len(runes); length++ {
+			for i := 0; i <= len(runes)-length; i++ {
+				term := string(runes[i : i+length])
+				if !seen[term] && isValidTerm(term) {
+					seen[term] = true
+					terms = append(terms, term)
+				}
+			}
+		}
+	}
+
+	// 限制候选词数量，避免 embedding 请求过大
+	if len(terms) > 50 {
+		terms = terms[:50]
+	}
+
+	return terms
+}
+
+// isValidTerm 判断是否是有效的候选词
+func isValidTerm(term string) bool {
+	// 过滤纯数字、纯标点等
+	hasLetter := false
+	for _, r := range term {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+			break
+		}
+	}
+	return hasLetter
+}
+
+// cosineSimilarity 计算余弦相似度
+func cosineSimilarity(a, b []float32) float64 {
+	if len(a) != len(b) || len(a) == 0 {
+		return 0
+	}
+
+	var dotProduct, normA, normB float64
+	for i := range a {
+		dotProduct += float64(a[i]) * float64(b[i])
+		normA += float64(a[i]) * float64(a[i])
+		normB += float64(b[i]) * float64(b[i])
+	}
+
+	if normA == 0 || normB == 0 {
+		return 0
+	}
+
+	return dotProduct / (math.Sqrt(normA) * math.Sqrt(normB))
 }
 
 // 默认同义词表（技术术语 + 常用词）
@@ -62,7 +317,7 @@ var defaultSynonyms = map[string][]string{
 	"api": {"接口", "服务", "endpoint"},
 	"请求":  {"request", "调用"},
 	"响应":  {"response", "返回", "结果"},
-	"超时":  {"timeout", "延迟", "慢"},
+	"超时":  {"timeout", "延迟", "慢", "连接超时", "网络超时", "请求超时"},
 	"慢":   {"超时", "卡顿", "延迟", "性能"},
 	"卡顿":  {"慢", "延迟", "性能问题"},
 	"性能":  {"performance", "慢", "优化"},
@@ -105,6 +360,16 @@ var defaultSynonyms = map[string][]string{
 	"失败": {"fail", "error", "错误", "异常"},
 	"完成": {"done", "成功", "结束"},
 	"进行": {"doing", "处理中", "进行中"},
+
+	// 签名验证相关
+	"签名错误":   {"签名验证失败", "签名失败", "签名异常", "sign error", "signature"},
+	"签名验证失败": {"签名错误", "签名失败", "签名异常"},
+	"签名失败":   {"签名错误", "签名验证失败"},
+
+	// 支付错误相关
+	"参数错误":  {"parameter error", "参数异常", "参数不对"},
+	"余额不足":  {"insufficient balance", "余额不够", "没钱"},
+	"配置缺失":  {"配置错误", "未配置", "缺少配置"},
 
 	// 功能需求相关
 	"功能": {"feature", "需求", "特性"},

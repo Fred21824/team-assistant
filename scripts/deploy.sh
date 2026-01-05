@@ -143,6 +143,7 @@ deploy() {
 install_service() {
     log_info "安装 systemd 服务..."
 
+    # 主服务
     ssh_cmd << ENDSSH
 sudo tee /etc/systemd/system/${SERVICE_NAME}.service > /dev/null << 'EOF'
 [Unit]
@@ -167,24 +168,69 @@ sudo systemctl daemon-reload
 sudo systemctl enable ${SERVICE_NAME}
 ENDSSH
 
+    # syncworker 服务
+    ssh_cmd << ENDSSH
+sudo tee /etc/systemd/system/syncworker.service > /dev/null << 'EOF'
+[Unit]
+Description=Team Assistant Sync Worker - Message Sync Service
+After=network.target mysql.service redis.service team-assistant.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=${SERVER_DIR}
+ExecStart=${SERVER_DIR}/bin/syncworker -f ${SERVER_DIR}/etc/config.yaml
+Restart=always
+RestartSec=10
+StandardOutput=append:${SERVER_DIR}/logs/syncworker.log
+StandardError=append:${SERVER_DIR}/logs/syncworker.log
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable syncworker
+ENDSSH
+
     log_info "服务安装完成"
 }
 
 # 启动服务
 start() {
-    log_info "启动服务..."
+    log_info "启动主服务..."
     ssh_cmd "sudo systemctl start ${SERVICE_NAME}"
-    sleep 3
+    sleep 2
+
+    log_info "启动 syncworker..."
+    ssh_cmd "sudo systemctl start syncworker"
+    sleep 2
 
     # 检查状态
+    local main_ok=false
+    local sync_ok=false
+
     if ssh_cmd "sudo systemctl is-active ${SERVICE_NAME}" | grep -q "active"; then
-        log_info "服务启动成功"
+        main_ok=true
+        log_info "主服务启动成功"
+    else
+        log_error "主服务启动失败"
+        ssh_cmd "sudo journalctl -u ${SERVICE_NAME} -n 20 --no-pager"
+    fi
+
+    if ssh_cmd "sudo systemctl is-active syncworker" | grep -q "active"; then
+        sync_ok=true
+        log_info "syncworker 启动成功"
+    else
+        log_warn "syncworker 启动失败（非致命）"
+        ssh_cmd "sudo journalctl -u syncworker -n 20 --no-pager"
+    fi
+
+    if [ "$main_ok" = true ]; then
         log_info "访问地址: http://${SERVER_IP}:${SERVICE_PORT}"
         log_info "健康检查: http://${SERVER_IP}:${SERVICE_PORT}/health"
         log_info "飞书 Webhook: http://${SERVER_IP}:${SERVICE_PORT}/webhook/lark"
     else
-        log_error "服务启动失败"
-        ssh_cmd "sudo journalctl -u ${SERVICE_NAME} -n 30 --no-pager"
         exit 1
     fi
 }
@@ -192,29 +238,40 @@ start() {
 # 停止服务
 stop() {
     log_info "停止服务..."
+    ssh_cmd "sudo systemctl stop syncworker 2>/dev/null || true"
     ssh_cmd "sudo systemctl stop ${SERVICE_NAME} 2>/dev/null || true"
-    log_info "服务已停止"
+    log_info "所有服务已停止"
 }
 
 # 重启服务
 restart() {
     log_info "重启服务..."
     ssh_cmd "sudo systemctl restart ${SERVICE_NAME}"
+    ssh_cmd "sudo systemctl restart syncworker"
     sleep 3
 
     if ssh_cmd "sudo systemctl is-active ${SERVICE_NAME}" | grep -q "active"; then
-        log_info "服务重启成功"
+        log_info "主服务重启成功"
     else
-        log_error "服务重启失败"
+        log_error "主服务重启失败"
         ssh_cmd "sudo journalctl -u ${SERVICE_NAME} -n 30 --no-pager"
         exit 1
+    fi
+
+    if ssh_cmd "sudo systemctl is-active syncworker" | grep -q "active"; then
+        log_info "syncworker 重启成功"
+    else
+        log_warn "syncworker 重启失败"
     fi
 }
 
 # 查看状态
 status() {
-    log_info "服务状态:"
+    log_info "=== 主服务状态 ==="
     ssh_cmd "sudo systemctl status ${SERVICE_NAME} --no-pager || true"
+    echo ""
+    log_info "=== syncworker 状态 ==="
+    ssh_cmd "sudo systemctl status syncworker --no-pager || true"
 }
 
 # 查看日志

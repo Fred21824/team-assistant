@@ -1067,21 +1067,18 @@ func (hp *HybridProcessor) answerWithContext(ctx context.Context, question, cont
 		return "", fmt.Errorf("LLM client not available")
 	}
 
-	prompt := fmt.Sprintf(`请根据以下聊天记录回答用户的问题。
+	prompt := fmt.Sprintf(`根据聊天记录回答问题，要求精简。
 
-用户问题：%s
+问题：%s
 
-相关聊天记录：
+记录：
 %s
 
-【重要约束 - 请严格遵守】：
-1. **禁止编造**：只能从上面的聊天记录中提取信息，绝对不能编造任何内容
-2. **精确引用**：回答中提到的任何具体信息（站点名、订单号、金额、人名等）必须与聊天记录中的原文完全一致
-3. **标注来源**：在回答关键信息时，最好能引用消息的时间或发送者，如"根据xx的消息..."
-4. **承认不知**：如果聊天记录中没有明确的答案，必须说"聊天记录中没有找到相关信息"，不要猜测
-5. **支付告警解读**：如果消息是支付告警/通知，请仔细提取其中的站点、订单号、通道等关键字段
-
-回答要求：简洁明了，重点突出关键信息`, question, context)
+约束：
+1. 只从记录提取，不编造
+2. 按频次/重要性列出要点（如问题统计：列出问题类型+次数）
+3. 无相关信息则说明"未找到"
+4. 格式：标题+要点列表，不要长段落`, question, context)
 
 	return hp.llmClient.GenerateResponse(ctx, prompt, nil)
 }

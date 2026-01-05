@@ -319,22 +319,19 @@ func (c *Client) ParseUserQuery(ctx context.Context, query string) (*ParsedQuery
 func (c *Client) GenerateResponse(ctx context.Context, prompt string, data interface{}) (string, error) {
 	dataJSON, _ := json.MarshalIndent(data, "", "  ")
 
-	userPrompt := fmt.Sprintf(`根据以下数据生成一个友好的中文回复：
+	userPrompt := fmt.Sprintf(`问题：%s
 
-用户问题：%s
+数据：%s
 
-数据：
-%s
-
-请用简洁、友好的语言回复用户的问题。`, prompt, string(dataJSON))
+要求：精简回复，用要点列表`, prompt, string(dataJSON))
 
 	req := ChatRequest{
 		Model: c.model,
 		Messages: []ChatMessage{
-			{Role: "system", Content: "你是一个友好的团队助手，帮助团队成员了解工作情况。回复要简洁、专业。"},
+			{Role: "system", Content: "团队助手，回复简洁专业，用列表格式"},
 			{Role: "user", Content: userPrompt},
 		},
-		MaxTokens: 1024,
+		MaxTokens: 512,
 	}
 
 	resp, err := c.chat(ctx, req)
@@ -360,29 +357,20 @@ func (c *Client) SummarizeMessages(ctx context.Context, messages []string) (stri
 		content = content[:8000] + "...(内容已截断)"
 	}
 
-	systemPrompt := `你是一个专业的团队沟通内容分析助手。请对以下群聊消息进行全面、详细的总结分析。
-
-要求：
-1. **讨论主题**：列出所有讨论的主要话题，每个话题用1-2句话概括核心内容
-2. **关键决策**：明确列出已经达成的决定或结论
-3. **重要信息**：提取具体的数据、日期、金额、人名、技术方案等关键信息
-4. **问题与阻碍**：列出提到的问题、Bug、困难或风险
-5. **待办事项**：明确谁需要做什么，如果有明确责任人请标注
-6. **进展更新**：如有提到任务进度或状态变化，请列出
-
-格式要求：
-- 使用清晰的分类标题
-- 每个要点简洁但完整，包含必要的上下文
-- 如果某个分类没有相关内容，可以省略该分类
-- 保持客观，忠实原文内容，不要添加推测`
+	systemPrompt := `总结群聊消息，格式精简：
+1. 主要话题（每条1句话）
+2. 关键决策/结论
+3. 问题/Bug（如有）
+4. 待办事项（标注责任人）
+省略无内容的分类，不要长段落`
 
 	req := ChatRequest{
 		Model: c.model,
 		Messages: []ChatMessage{
 			{Role: "system", Content: systemPrompt},
-			{Role: "user", Content: fmt.Sprintf("请详细总结以下群聊消息：\n\n%s", content)},
+			{Role: "user", Content: content},
 		},
-		MaxTokens: 2048,
+		MaxTokens: 1024,
 	}
 
 	resp, err := c.chat(ctx, req)

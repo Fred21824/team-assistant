@@ -409,6 +409,40 @@ func (c *Client) SendMessageToUser(ctx context.Context, openID, msgType, content
 	return nil
 }
 
+// DownloadImage 下载图片，返回 base64 编码的图片数据
+func (c *Client) DownloadImage(ctx context.Context, imageKey string) ([]byte, error) {
+	token, err := c.GetTenantAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/open-apis/im/v1/images/%s", c.domain, imageKey)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("download image failed: status=%d, body=%s", resp.StatusCode, string(body))
+	}
+
+	imageData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read image data failed: %w", err)
+	}
+
+	return imageData, nil
+}
+
 // GetChatHistory 获取群聊历史消息（支持时间范围）
 func (c *Client) GetChatHistory(ctx context.Context, chatID string, startTime, endTime string, pageSize int, pageToken string) (*GetMessagesResponse, error) {
 	token, err := c.GetTenantAccessToken(ctx)

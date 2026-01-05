@@ -60,6 +60,10 @@ type LLMConfig struct {
 	APIKey   string `yaml:"APIKey"`
 	Endpoint string `yaml:"Endpoint"` // API端点
 	Model    string `yaml:"Model"`    // 模型名称
+	// 视觉模型配置（可选，用于处理图片）
+	VisionModel    string `yaml:"VisionModel"`    // 视觉模型名称，如 meta/llama-3.2-90b-vision-instruct
+	VisionEndpoint string `yaml:"VisionEndpoint"` // 视觉模型端点（如果和主模型不同）
+	VisionAPIKey   string `yaml:"VisionAPIKey"`   // 视觉模型 API Key（如果和主模型不同）
 	// 代理配置（用于香港等受限地区访问 Claude API）
 	ProxyHost     string `yaml:"ProxyHost"`     // 代理主机，如 52.41.128.82
 	ProxyPort     int    `yaml:"ProxyPort"`     // 代理端口，如 9662

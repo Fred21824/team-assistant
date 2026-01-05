@@ -112,6 +112,10 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 			}
 		}
 		llmClient = llm.NewClientWithProxy(c.LLM.APIKey, c.LLM.Endpoint, c.LLM.Model, proxyConfig)
+		// 设置视觉模型配置（如果配置了）
+		if c.LLM.VisionModel != "" {
+			llmClient.SetVisionConfig(c.LLM.VisionModel, c.LLM.VisionEndpoint, c.LLM.VisionAPIKey)
+		}
 	}
 
 	var difyClient *dify.Client

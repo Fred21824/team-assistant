@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -65,13 +66,21 @@ type ProxyConfig struct {
 	Password string
 }
 
+// VisionConfig 视觉模型配置
+type VisionConfig struct {
+	Model    string // 视觉模型名称
+	Endpoint string // 视觉模型端点（可选，为空则使用主端点）
+	APIKey   string // 视觉模型 API Key（可选，为空则使用主 API Key）
+}
+
 // Client LLM客户端
 type Client struct {
-	apiKey     string
-	endpoint   string
-	model      string
-	provider   string // "openai", "anthropic", "groq"
-	client     *http.Client
+	apiKey       string
+	endpoint     string
+	model        string
+	provider     string // "openai", "anthropic", "groq"
+	client       *http.Client
+	visionConfig *VisionConfig // 视觉模型配置（可选）
 }
 
 // NewClient 创建LLM客户端
@@ -132,6 +141,45 @@ func NewClientWithProxy(apiKey, endpoint, model string, proxyConfig *ProxyConfig
 		provider: provider,
 		client:   httpClient,
 	}
+}
+
+// SetVisionConfig 设置视觉模型配置
+func (c *Client) SetVisionConfig(visionModel, visionEndpoint, visionAPIKey string) {
+	if visionModel != "" {
+		c.visionConfig = &VisionConfig{
+			Model:    visionModel,
+			Endpoint: visionEndpoint,
+			APIKey:   visionAPIKey,
+		}
+	}
+}
+
+// HasVisionSupport 检查是否支持视觉模型
+func (c *Client) HasVisionSupport() bool {
+	return c.visionConfig != nil && c.visionConfig.Model != ""
+}
+
+// hasImageContent 检查请求中是否包含图片
+func (c *Client) hasImageContent(req ChatRequest) bool {
+	for _, msg := range req.Messages {
+		switch content := msg.Content.(type) {
+		case []ContentPart:
+			for _, part := range content {
+				if part.Type == "image_url" && part.ImageURL != nil {
+					return true
+				}
+			}
+		case []interface{}:
+			for _, item := range content {
+				if m, ok := item.(map[string]interface{}); ok {
+					if m["type"] == "image_url" {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // ChatRequest 聊天请求
@@ -491,19 +539,88 @@ func (c *Client) chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 }
 
 // chatOpenAI 使用 OpenAI 兼容格式 (OpenAI, Groq, NVIDIA NIM 等)
+// 包含自动重试机制：超时或网络错误时最多重试 2 次
 func (c *Client) chatOpenAI(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	const maxRetries = 3
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, err := c.doOpenAIRequest(ctx, req)
+		if err == nil {
+			return resp, nil
+		}
+
+		lastErr = err
+
+		// 判断是否是可重试的错误（超时、网络错误）
+		if !isRetryableError(err) {
+			return nil, err
+		}
+
+		// 最后一次尝试不需要等待
+		if attempt < maxRetries {
+			log.Printf("[LLM] Request failed (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
+			// 指数退避：1秒、2秒
+			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+	}
+
+	return nil, fmt.Errorf("LLM request failed after %d attempts: %w", maxRetries, lastErr)
+}
+
+// isRetryableError 判断是否是可重试的错误
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	// 超时错误
+	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "Timeout") {
+		return true
+	}
+	// 连接错误
+	if strings.Contains(errStr, "connection") || strings.Contains(errStr, "EOF") {
+		return true
+	}
+	// 服务端错误 (5xx)
+	if strings.Contains(errStr, "HTTP 5") {
+		return true
+	}
+	// 限流错误 (429)
+	if strings.Contains(errStr, "HTTP 429") || strings.Contains(errStr, "rate limit") {
+		return true
+	}
+	return false
+}
+
+// doOpenAIRequest 执行单次 OpenAI API 请求
+func (c *Client) doOpenAIRequest(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
+	// 检测请求中是否包含图片，如果有则切换到视觉模型
+	endpoint := c.endpoint
+	apiKey := c.apiKey
+	if c.hasImageContent(req) && c.visionConfig != nil && c.visionConfig.Model != "" {
+		log.Printf("[LLM] Detected image in request, switching to vision model: %s", c.visionConfig.Model)
+		req.Model = c.visionConfig.Model
+		if c.visionConfig.Endpoint != "" {
+			endpoint = c.visionConfig.Endpoint
+		}
+		if c.visionConfig.APIKey != "" {
+			apiKey = c.visionConfig.APIKey
+		}
+	}
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.endpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+c.apiKey)
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
 	resp, err := c.client.Do(httpReq)
 	if err != nil {

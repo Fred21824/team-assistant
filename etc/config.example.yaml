@@ -67,6 +67,12 @@ LLM:
   # Endpoint: "https://api.anthropic.com/v1/messages"
   # Model: "claude-sonnet-4-20250514"
 
+  # 视觉模型配置（可选，用于处理图片消息）
+  # 当消息包含图片时，会自动切换到视觉模型
+  # VisionModel: "meta/llama-3.2-90b-vision-instruct"
+  # VisionEndpoint: "https://integrate.api.nvidia.com/v1/chat/completions"  # 可选，默认使用主 Endpoint
+  # VisionAPIKey: ""  # 可选，默认使用主 APIKey
+
 # Dify 配置（可选，启用后使用 Dify 处理对话）
 Dify:
   Enabled: false

@@ -65,6 +65,10 @@ func main() {
 		}
 	}
 	llmClient := llm.NewClientWithProxy(cfg.LLM.APIKey, cfg.LLM.Endpoint, cfg.LLM.Model, proxyConfig)
+	// 设置视觉模型配置
+	if cfg.LLM.VisionModel != "" {
+		llmClient.SetVisionConfig(cfg.LLM.VisionModel, cfg.LLM.VisionEndpoint, cfg.LLM.VisionAPIKey)
+	}
 
 	// 初始化服务上下文
 	svcCtx := &svc.ServiceContext{

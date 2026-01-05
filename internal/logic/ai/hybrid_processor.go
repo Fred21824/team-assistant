@@ -75,6 +75,15 @@ func NewHybridProcessor(svcCtx *svc.ServiceContext) *HybridProcessor {
 			svcCtx.Config.LLM.Model,
 			proxyConfig,
 		)
+		// 设置视觉模型配置
+		if svcCtx.Config.LLM.VisionModel != "" {
+			hp.llmClient.SetVisionConfig(
+				svcCtx.Config.LLM.VisionModel,
+				svcCtx.Config.LLM.VisionEndpoint,
+				svcCtx.Config.LLM.VisionAPIKey,
+			)
+			log.Printf("Vision model configured: %s", svcCtx.Config.LLM.VisionModel)
+		}
 		if !hp.useDify {
 			log.Println("Using native LLM for AI processing")
 		} else {

@@ -39,7 +39,7 @@ type RedisConfig struct {
 
 // LarkConfig 飞书配置
 type LarkConfig struct {
-	Domain            string `yaml:"Domain"`            // https://open.larksuite.com 或 https://open.feishu.cn
+	Domain            string `yaml:"Domain"` // https://open.larksuite.com 或 https://open.feishu.cn
 	AppID             string `yaml:"AppID"`
 	AppSecret         string `yaml:"AppSecret"`
 	VerificationToken string `yaml:"VerificationToken"` // 事件验证Token
@@ -77,11 +77,12 @@ type DifyConfig struct {
 
 // VectorDBConfig 向量数据库配置
 type VectorDBConfig struct {
-	Enabled          bool   `yaml:"Enabled"`          // 是否启用向量搜索
-	QdrantEndpoint   string `yaml:"QdrantEndpoint"`   // Qdrant 地址，如 http://localhost:6333
-	OllamaEndpoint   string `yaml:"OllamaEndpoint"`   // Ollama 地址，如 http://localhost:11434
-	EmbeddingModel   string `yaml:"EmbeddingModel"`   // Embedding 模型，默认 nomic-embed-text
-	CollectionName   string `yaml:"CollectionName"`   // 集合名称，默认 messages
+	Enabled            bool   `yaml:"Enabled"`            // 是否启用向量搜索
+	QdrantEndpoint     string `yaml:"QdrantEndpoint"`     // Qdrant 地址，如 http://localhost:6333
+	OllamaEndpoint     string `yaml:"OllamaEndpoint"`     // Ollama 地址，如 http://localhost:11434
+	EmbeddingModel     string `yaml:"EmbeddingModel"`     // Embedding 模型，默认 nomic-embed-text
+	EmbeddingDimension int    `yaml:"EmbeddingDimension"` // Embedding 维度，默认 768（nomic-embed-text）
+	CollectionName     string `yaml:"CollectionName"`     // 集合名称，默认 messages
 }
 
 // BitableConfig 多维表格配置

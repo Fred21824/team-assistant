@@ -19,23 +19,23 @@ import (
 
 // ConversationContext 对话上下文
 type ConversationContext struct {
-	LastQuery     string       // 上一个问题
+	LastQuery     string           // 上一个问题
 	LastParsed    *llm.ParsedQuery // 上一次解析结果
-	LastChatID    string       // 上一次使用的 chatID
-	LastTimestamp time.Time    // 上一次交互时间
+	LastChatID    string           // 上一次使用的 chatID
+	LastTimestamp time.Time        // 上一次交互时间
 }
 
 // HybridProcessor 混合 AI 处理器
 // 支持 Dify 和原生 LLM 两种模式
 type HybridProcessor struct {
-	svcCtx           *svc.ServiceContext
-	difyClient       *dify.Client
-	llmClient        *llm.Client
-	useDify          bool
-	datasetID        string            // Dify 知识库 ID
-	conversationMap  map[string]string // 用户对话 ID 映射 (userID -> conversationID)
-	contextMap       map[string]*ConversationContext // 用户对话上下文 (userID -> context)
-	mu               sync.RWMutex      // 保护 conversationMap 和 contextMap 的并发访问
+	svcCtx          *svc.ServiceContext
+	difyClient      *dify.Client
+	llmClient       *llm.Client
+	useDify         bool
+	datasetID       string                          // Dify 知识库 ID
+	conversationMap map[string]string               // 用户对话 ID 映射 (userID -> conversationID)
+	contextMap      map[string]*ConversationContext // 用户对话上下文 (userID -> context)
+	mu              sync.RWMutex                    // 保护 conversationMap 和 contextMap 的并发访问
 }
 
 // NewHybridProcessor 创建混合处理器
@@ -432,7 +432,7 @@ func (hp *HybridProcessor) handleMessageSearch(ctx context.Context, parsed *llm.
 	return hp.handleKeywordSearch(ctx, parsed, currentChatID)
 }
 
-// handleSemanticSearch 语义搜索（RAG）
+// handleSemanticSearch 语义搜索（RAG）- 使用混合搜索
 func (hp *HybridProcessor) handleSemanticSearch(ctx context.Context, parsed *llm.ParsedQuery, currentChatID string) (string, error) {
 	// 构建搜索查询
 	query := parsed.RawQuery
@@ -443,37 +443,37 @@ func (hp *HybridProcessor) handleSemanticSearch(ctx context.Context, parsed *llm
 	// 确定搜索范围：私聊时搜索所有群，群聊时限定当前群
 	chatID := hp.getSearchChatID(currentChatID, parsed.TargetGroup, ctx)
 
-	// 构建搜索选项
-	searchOpts := service.SearchOptions{
-		ChatID: chatID,
-	}
+	// 构建混合搜索选项
+	hybridOpts := service.DefaultHybridSearchOptions()
+	hybridOpts.ChatID = chatID
+	hybridOpts.Keywords = parsed.Keywords
 
 	// 添加用户过滤
 	if len(parsed.TargetUsers) > 0 {
-		searchOpts.SenderName = parsed.TargetUsers[0] // 使用第一个目标用户
-		log.Printf("Semantic search with user filter: %s", searchOpts.SenderName)
+		hybridOpts.SenderName = parsed.TargetUsers[0] // 使用第一个目标用户
+		log.Printf("Hybrid search with user filter: %s", hybridOpts.SenderName)
 	}
 
 	// 添加时间范围过滤
 	startTime, endTime := hp.getTimeRange(parsed.TimeRange)
-	searchOpts.StartTime = &startTime
-	searchOpts.EndTime = &endTime
-	log.Printf("Semantic search time range: %s ~ %s", startTime.Format("2006-01-02 15:04"), endTime.Format("2006-01-02 15:04"))
+	hybridOpts.StartTime = &startTime
+	hybridOpts.EndTime = &endTime
+	log.Printf("Hybrid search time range: %s ~ %s", startTime.Format("2006-01-02 15:04"), endTime.Format("2006-01-02 15:04"))
 
-	// 执行语义搜索
-	results, err := hp.svcCtx.Services.RAG.SearchWithOptions(ctx, query, 15, searchOpts)
+	// 执行混合搜索（语义 + 关键词融合 + 同义词扩展 + 动态 top-k）
+	results, err := hp.svcCtx.Services.RAG.HybridSearch(ctx, query, parsed.Keywords, 15, hybridOpts)
 	if err != nil {
-		log.Printf("Semantic search failed: %v, falling back to keyword search", err)
+		log.Printf("Hybrid search failed: %v, falling back to keyword search", err)
 		return hp.handleKeywordSearch(ctx, parsed, currentChatID)
 	}
 
 	if len(results) == 0 {
 		// 如果带过滤条件没找到，尝试放宽条件重新搜索
-		if searchOpts.SenderName != "" || searchOpts.StartTime != nil {
+		if hybridOpts.SenderName != "" || hybridOpts.StartTime != nil {
 			log.Printf("No results with filters, trying without time filter")
-			searchOpts.StartTime = nil
-			searchOpts.EndTime = nil
-			results, err = hp.svcCtx.Services.RAG.SearchWithOptions(ctx, query, 15, searchOpts)
+			hybridOpts.StartTime = nil
+			hybridOpts.EndTime = nil
+			results, err = hp.svcCtx.Services.RAG.HybridSearch(ctx, query, parsed.Keywords, 15, hybridOpts)
 			if err != nil || len(results) == 0 {
 				return "没有找到相关的消息。", nil
 			}
@@ -483,7 +483,7 @@ func (hp *HybridProcessor) handleSemanticSearch(ctx context.Context, parsed *llm
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("🔍 语义搜索找到 %d 条相关消息:\n\n", len(results)))
+	sb.WriteString(fmt.Sprintf("🔍 混合搜索找到 %d 条相关消息:\n\n", len(results)))
 
 	for i, r := range results {
 		if i >= 10 {
@@ -702,27 +702,27 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 		log.Printf("Keyword search '%s': found %d messages", kw, len(messages))
 	}
 
-	// 2. 使用 RAG 语义搜索补充（带时间过滤）
+	// 2. 使用混合搜索补充（语义 + 关键词融合 + 同义词扩展）
 	if hp.svcCtx.Services.RAG != nil && hp.svcCtx.Services.RAG.IsEnabled() {
 		searchQuery := query
 		if len(keywords) > 0 {
 			searchQuery = strings.Join(keywords, " ")
 		}
 
-		// 构建搜索选项
-		searchOpts := service.SearchOptions{
-			ChatID: chatID,
-		}
+		// 构建混合搜索选项
+		hybridOpts := service.DefaultHybridSearchOptions()
+		hybridOpts.ChatID = chatID
+		hybridOpts.Keywords = keywords
 		if hasTimeFilter {
-			searchOpts.StartTime = &startTime
-			searchOpts.EndTime = &endTime
+			hybridOpts.StartTime = &startTime
+			hybridOpts.EndTime = &endTime
 		}
 
-		results, err := hp.svcCtx.Services.RAG.SearchWithOptions(ctx, searchQuery, 30, searchOpts)
+		results, err := hp.svcCtx.Services.RAG.HybridSearch(ctx, searchQuery, keywords, 30, hybridOpts)
 		if err != nil {
-			log.Printf("RAG search failed: %v", err)
+			log.Printf("Hybrid search failed: %v", err)
 		} else {
-			log.Printf("RAG search found %d results", len(results))
+			log.Printf("Hybrid search found %d results", len(results))
 			for _, r := range results {
 				if _, exists := messageMap[r.Content]; !exists {
 					formatted := fmt.Sprintf("[%s] %s: %s",

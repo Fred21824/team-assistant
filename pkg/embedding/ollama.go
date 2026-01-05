@@ -12,21 +12,31 @@ import (
 
 // OllamaClient Ollama embedding 客户端
 type OllamaClient struct {
-	endpoint string
-	model    string
-	client   *http.Client
+	endpoint  string
+	model     string
+	dimension int
+	client    *http.Client
 }
 
 // NewOllamaClient 创建 Ollama 客户端
 func NewOllamaClient(endpoint, model string) *OllamaClient {
+	return NewOllamaClientWithDimension(endpoint, model, 768)
+}
+
+// NewOllamaClientWithDimension 创建指定维度的 Ollama 客户端
+func NewOllamaClientWithDimension(endpoint, model string, dimension int) *OllamaClient {
 	if model == "" {
 		model = "nomic-embed-text"
 	}
+	if dimension <= 0 {
+		dimension = 768 // 默认维度
+	}
 	return &OllamaClient{
-		endpoint: endpoint,
-		model:    model,
+		endpoint:  endpoint,
+		model:     model,
+		dimension: dimension,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: 120 * time.Second, // 增加超时时间，大文本可能需要更长
 		},
 	}
 }
@@ -98,6 +108,5 @@ func (c *OllamaClient) GetEmbeddings(ctx context.Context, texts []string) ([][]f
 
 // GetDimension 获取 embedding 维度
 func (c *OllamaClient) GetDimension() int {
-	// nomic-embed-text 的维度是 768
-	return 768
+	return c.dimension
 }

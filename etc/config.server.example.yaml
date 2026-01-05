@@ -59,6 +59,7 @@ VectorDB:
   QdrantEndpoint: "http://127.0.0.1:6333"
   OllamaEndpoint: "http://127.0.0.1:11434"
   EmbeddingModel: "nomic-embed-text"
+  EmbeddingDimension: 768  # Embedding 维度，nomic-embed-text 默认 768
   CollectionName: "lark_messages"
 
 # Bitable 配置

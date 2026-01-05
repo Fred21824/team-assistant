@@ -84,6 +84,7 @@ func main() {
 			cfg.VectorDB.OllamaEndpoint,
 			cfg.VectorDB.EmbeddingModel,
 			cfg.VectorDB.CollectionName,
+			cfg.VectorDB.EmbeddingDimension,
 			true,
 		)
 		svcCtx.Services.RAG = ragService

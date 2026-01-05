@@ -151,6 +151,7 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		c.VectorDB.OllamaEndpoint,
 		c.VectorDB.EmbeddingModel,
 		c.VectorDB.CollectionName,
+		c.VectorDB.EmbeddingDimension,
 		c.VectorDB.Enabled,
 	)
 

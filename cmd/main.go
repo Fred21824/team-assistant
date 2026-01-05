@@ -51,10 +51,10 @@ func main() {
 		log.Println("GitHub collector disabled (no token configured)")
 	}
 
-	// 启动消息同步器
+	// 消息同步器（仅用于创建任务，不再自动运行同步）
+	// 同步任务由独立的 syncworker 进程处理
 	msgSyncer := collector.NewMessageSyncer(svcCtx)
-	go msgSyncer.Start()
-	log.Println("Message syncer started")
+	log.Println("Message syncer initialized (sync handled by separate worker process)")
 
 	// 启动 Dify 知识库同步器
 	var difySyncer *collector.DifySyncer

@@ -95,8 +95,83 @@ func ParseMessageContent(msgType, content string) string {
 			}
 			return strings.Join(texts, " ")
 		}
+	case "interactive":
+		// 解析卡片消息（如告警通知、支付失败告警等）
+		return parseInteractiveContent(content)
 	}
 	return ""
+}
+
+// parseInteractiveContent 解析 interactive 卡片消息内容
+func parseInteractiveContent(content string) string {
+	var cardContent struct {
+		Title    string          `json:"title"`
+		Elements json.RawMessage `json:"elements"`
+	}
+	if err := json.Unmarshal([]byte(content), &cardContent); err != nil {
+		return ""
+	}
+
+	var texts []string
+	if cardContent.Title != "" {
+		texts = append(texts, cardContent.Title)
+	}
+
+	// 尝试解析 elements 数组
+	var elements []json.RawMessage
+	if err := json.Unmarshal(cardContent.Elements, &elements); err == nil {
+		for _, elem := range elements {
+			extractTextsFromElement(elem, &texts)
+		}
+	}
+
+	return strings.Join(texts, "\n")
+}
+
+// extractTextsFromElement 递归提取卡片元素中的文本
+func extractTextsFromElement(elem json.RawMessage, texts *[]string) {
+	// 尝试解析为数组（嵌套的元素行）
+	var elemArray []json.RawMessage
+	if err := json.Unmarshal(elem, &elemArray); err == nil {
+		for _, subElem := range elemArray {
+			extractTextsFromElement(subElem, texts)
+		}
+		return
+	}
+
+	// 尝试解析为对象
+	var elemObj struct {
+		Tag      string          `json:"tag"`
+		Text     string          `json:"text"`
+		Content  string          `json:"content"`
+		Elements json.RawMessage `json:"elements"`
+	}
+	if err := json.Unmarshal(elem, &elemObj); err != nil {
+		return
+	}
+
+	// 提取文本（支持多种标签类型）
+	// text/plain_text/lark_md: 普通文本
+	// a: 链接标签，text 字段包含链接文字（如站点名称、订单号等）
+	switch elemObj.Tag {
+	case "text", "plain_text", "lark_md", "a":
+		if elemObj.Text != "" {
+			*texts = append(*texts, elemObj.Text)
+		}
+		if elemObj.Content != "" {
+			*texts = append(*texts, elemObj.Content)
+		}
+	}
+
+	// 递归处理嵌套元素
+	if len(elemObj.Elements) > 0 {
+		var subElements []json.RawMessage
+		if err := json.Unmarshal(elemObj.Elements, &subElements); err == nil {
+			for _, subElem := range subElements {
+				extractTextsFromElement(subElem, texts)
+			}
+		}
+	}
 }
 
 // ExtractTextFromMentions 从内容中移除@信息，只保留文本
@@ -108,20 +183,31 @@ func ExtractTextFromMentions(text string) string {
 
 // IsAtBot 检查消息是否@了机器人
 func IsAtBot(event *MessageReceiveEvent, botOpenID string) bool {
-	// 如果有 mentions，说明 @ 了某人
-	if len(event.Message.Mentions) > 0 {
-		// 如果配置了 BotOpenID，精确匹配
-		if botOpenID != "" {
-			for _, mention := range event.Message.Mentions {
-				if mention.ID.OpenID == botOpenID {
-					return true
-				}
+	// 如果没有 mentions，说明没有 @ 任何人
+	if len(event.Message.Mentions) == 0 {
+		return false
+	}
+
+	// 如果配置了 BotOpenID，精确匹配
+	if botOpenID != "" {
+		for _, mention := range event.Message.Mentions {
+			if mention.ID.OpenID == botOpenID {
+				return true
 			}
-			return false
 		}
-		// 如果没有配置 BotOpenID，检查是否 @ 了机器人（通过名字判断）
-		// 机器人通常会是第一个被 @ 的对象
-		return true
+		return false
+	}
+
+	// 如果没有配置 BotOpenID，通过名字判断是否@了机器人
+	// 检查 mentions 中是否有名字包含 "助手"、"bot"、"机器人" 的
+	for _, mention := range event.Message.Mentions {
+		nameLower := strings.ToLower(mention.Name)
+		if strings.Contains(nameLower, "助手") ||
+			strings.Contains(nameLower, "bot") ||
+			strings.Contains(nameLower, "机器人") ||
+			strings.Contains(nameLower, "assistant") {
+			return true
+		}
 	}
 	return false
 }

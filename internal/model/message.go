@@ -48,7 +48,7 @@ func (m *ChatMessageModel) Insert(ctx context.Context, msg *ChatMessage) error {
 	query := `INSERT INTO chat_messages (message_id, chat_id, sender_id, sender_name, member_id, msg_type,
               content, raw_content, mentions, reply_to_id, is_at_bot, created_at)
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              ON DUPLICATE KEY UPDATE content = VALUES(content)`
+              ON DUPLICATE KEY UPDATE content = VALUES(content), sender_name = COALESCE(VALUES(sender_name), sender_name)`
 	_, err := m.db.ExecContext(ctx, query, msg.MessageID, msg.ChatID, msg.SenderID, msg.SenderName,
 		msg.MemberID, msg.MsgType, msg.Content, msg.RawContent, msg.Mentions, msg.ReplyToID, msg.IsAtBot, msg.CreatedAt)
 	return err
@@ -231,6 +231,39 @@ func (m *ChatMessageModel) GetAtBotMessages(ctx context.Context, limit int) ([]*
 		messages = append(messages, &msg)
 	}
 	return messages, nil
+}
+
+// GetDistinctSenders 获取不重复的发送者名称列表
+func (m *ChatMessageModel) GetDistinctSenders(ctx context.Context, chatID string) ([]string, error) {
+	var query string
+	var rows *sql.Rows
+	var err error
+
+	if chatID != "" {
+		query = `SELECT DISTINCT sender_name FROM chat_messages
+                 WHERE chat_id = ? AND sender_name IS NOT NULL AND sender_name != ''
+                 ORDER BY sender_name`
+		rows, err = m.db.QueryContext(ctx, query, chatID)
+	} else {
+		query = `SELECT DISTINCT sender_name FROM chat_messages
+                 WHERE sender_name IS NOT NULL AND sender_name != ''
+                 ORDER BY sender_name`
+		rows, err = m.db.QueryContext(ctx, query)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var senders []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		senders = append(senders, name)
+	}
+	return senders, nil
 }
 
 // ChatGroupModel 群聊模型

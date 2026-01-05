@@ -3,8 +3,10 @@ package collector
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"log"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,7 +36,7 @@ type MessageSyncer struct {
 func NewMessageSyncer(svcCtx *svc.ServiceContext) *MessageSyncer {
 	return &MessageSyncer{
 		svcCtx:    svcCtx,
-		batchSize: 50, // 每次拉取50条
+		batchSize: 50, // 飞书API限制最大50条/次
 		stopChan:  make(chan struct{}),
 		userCache: make(map[string]string),
 	}
@@ -118,6 +120,11 @@ func (s *MessageSyncer) processNextTask() {
 	}
 }
 
+// SyncTask 同步单个任务（公开方法，供外部调用）
+func (s *MessageSyncer) SyncTask(ctx context.Context, task *model.MessageSyncTask) error {
+	return s.syncMessages(ctx, task)
+}
+
 // syncMessages 同步消息
 func (s *MessageSyncer) syncMessages(ctx context.Context, task *model.MessageSyncTask) error {
 	pageToken := ""
@@ -136,6 +143,9 @@ func (s *MessageSyncer) syncMessages(ctx context.Context, task *model.MessageSyn
 	}
 
 	totalSynced := task.SyncedMessages
+
+	// 预加载群成员名称（使用群成员 API 而不是通讯录 API）
+	s.preloadChatMembers(ctx, task.ChatID)
 
 	// 拉取一批消息
 	resp, err := s.svcCtx.LarkClient.GetChatHistory(ctx, task.ChatID, startTime, endTime, s.batchSize, pageToken)
@@ -183,13 +193,12 @@ func (s *MessageSyncer) syncMessages(ctx context.Context, task *model.MessageSyn
 		}
 	}
 
-	log.Printf("Task %d: synced %d messages (total: %d), has_more: %v",
-		task.ID, len(resp.Data.Items), totalSynced, resp.Data.HasMore)
+	log.Printf("Task %d: synced %d messages (total: %d), has_more: %v, page_token: %s",
+		task.ID, len(resp.Data.Items), totalSynced, resp.Data.HasMore, truncateForLog(resp.Data.PageToken, 30))
 
 	// 更新进度
-	if resp.Data.HasMore {
-		s.svcCtx.SyncTaskModel.UpdateProgress(ctx, task.ID, totalSynced, resp.Data.PageToken)
-	} else {
+	// 修复：如果返回空数据或没有更多数据，标记为完成
+	if !resp.Data.HasMore || len(resp.Data.Items) == 0 {
 		// 完成
 		s.svcCtx.SyncTaskModel.MarkCompleted(ctx, task.ID, totalSynced)
 		log.Printf("Task %d completed, total messages: %d", task.ID, totalSynced)
@@ -198,9 +207,30 @@ func (s *MessageSyncer) syncMessages(ctx context.Context, task *model.MessageSyn
 		if task.RequestedBy.Valid {
 			s.notifyCompletion(ctx, task.RequestedBy.String, task, totalSynced)
 		}
+	} else {
+		s.svcCtx.SyncTaskModel.UpdateProgress(ctx, task.ID, totalSynced, resp.Data.PageToken)
 	}
 
 	return nil
+}
+
+// preloadChatMembers 预加载群成员名称到缓存
+func (s *MessageSyncer) preloadChatMembers(ctx context.Context, chatID string) {
+	members, err := s.svcCtx.LarkClient.GetChatMembers(ctx, chatID)
+	if err != nil {
+		log.Printf("Failed to preload chat members for %s: %v", chatID, err)
+		return
+	}
+
+	s.userCacheMu.Lock()
+	for openID, name := range members {
+		if name != "" {
+			s.userCache[openID] = name
+		}
+	}
+	s.userCacheMu.Unlock()
+
+	log.Printf("Preloaded %d member names for chat %s", len(members), chatID)
 }
 
 // getUserName 获取用户名（带缓存）
@@ -214,32 +244,18 @@ func (s *MessageSyncer) getUserName(ctx context.Context, openID string) string {
 		return "机器人"
 	}
 
-	// 先检查缓存
+	// 从缓存获取（已通过 preloadChatMembers 预加载）
 	s.userCacheMu.RLock()
-	if name, ok := s.userCache[openID]; ok {
-		s.userCacheMu.RUnlock()
-		return name
-	}
+	name, ok := s.userCache[openID]
 	s.userCacheMu.RUnlock()
 
-	// 调用API获取用户信息
-	userInfo, err := s.svcCtx.LarkClient.GetUserInfo(ctx, openID)
-	if err != nil {
-		log.Printf("Failed to get user info for %s: %v", openID, err)
-		return ""
+	if ok {
+		return name
 	}
 
-	name := userInfo.Name
-	if name == "" {
-		name = userInfo.EnName
-	}
-
-	// 存入缓存
-	s.userCacheMu.Lock()
-	s.userCache[openID] = name
-	s.userCacheMu.Unlock()
-
-	return name
+	// 缓存未命中，返回空（不再调用通讯录 API）
+	log.Printf("User name not found in cache for %s", openID)
+	return ""
 }
 
 // convertToMessage 转换消息格式
@@ -253,13 +269,29 @@ func (s *MessageSyncer) convertToMessage(ctx context.Context, item *lark.Message
 	}
 
 	// 解析消息内容
-	content := lark.ParseMessageContent(item.MsgType, item.Body.Content)
+	var content string
+	if item.MsgType == "image" {
+		// 处理图片消息：下载并分析（需要 messageID 来下载资源）
+		content = s.analyzeImageMessage(ctx, item.MessageID, item.Body.Content)
+	} else {
+		content = lark.ParseMessageContent(item.MsgType, item.Body.Content)
+	}
+
+	// 替换 @_user_N 为真实用户名
+	for _, mention := range item.Mentions {
+		if mention.Key != "" && mention.Name != "" {
+			content = strings.ReplaceAll(content, mention.Key, "@"+mention.Name)
+		}
+	}
 
 	// 序列化 mentions
 	mentionsJSON, _ := json.Marshal(item.Mentions)
 
 	// 获取发送者名称
 	senderName := s.getUserName(ctx, item.Sender.ID)
+	if senderName != "" {
+		log.Printf("Got sender name: %s -> %s", item.Sender.ID, senderName)
+	}
 
 	return &model.ChatMessage{
 		MessageID:  item.MessageID,
@@ -274,6 +306,62 @@ func (s *MessageSyncer) convertToMessage(ctx context.Context, item *lark.Message
 		IsAtBot:    0,
 		CreatedAt:  createTime,
 	}
+}
+
+// analyzeImageMessage 分析图片消息
+func (s *MessageSyncer) analyzeImageMessage(ctx context.Context, messageID, rawContent string) string {
+	// 解析 image_key
+	var imageContent struct {
+		ImageKey string `json:"image_key"`
+	}
+	if err := json.Unmarshal([]byte(rawContent), &imageContent); err != nil {
+		log.Printf("Failed to parse image content: %v", err)
+		return "[图片]"
+	}
+
+	if imageContent.ImageKey == "" {
+		return "[图片]"
+	}
+
+	// 下载图片（使用消息资源 API，需要 messageID 和 imageKey）
+	imageData, err := s.svcCtx.LarkClient.DownloadImage(ctx, messageID, imageContent.ImageKey)
+	if err != nil {
+		log.Printf("Failed to download image %s: %v", imageContent.ImageKey, err)
+		return "[图片]"
+	}
+
+	// 检测图片类型
+	mimeType := http.DetectContentType(imageData)
+	if !strings.HasPrefix(mimeType, "image/") {
+		mimeType = "image/png" // 默认
+	}
+
+	// 转换为 base64
+	imageBase64 := base64.StdEncoding.EncodeToString(imageData)
+
+	// 检查 LLM 客户端是否可用
+	if s.svcCtx.LLMClient == nil {
+		log.Printf("LLM client not available for image analysis")
+		return "[图片]"
+	}
+
+	// 调用 Vision API 分析图片
+	analysis, err := s.svcCtx.LLMClient.AnalyzeImage(ctx, imageBase64, mimeType)
+	if err != nil {
+		log.Printf("Failed to analyze image %s: %v", imageContent.ImageKey, err)
+		return "[图片]"
+	}
+
+	log.Printf("Image %s analyzed: %s", imageContent.ImageKey, truncateForLog(analysis, 100))
+	return "[图片] " + analysis
+}
+
+// truncateForLog 截断日志内容
+func truncateForLog(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }
 
 // notifyCompletion 通知用户同步完成

@@ -61,14 +61,30 @@ build() {
     log_info "编译项目 (Linux amd64)..."
 
     mkdir -p build
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/team-assistant ./cmd/main.go
 
+    # 编译主服务
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/team-assistant ./cmd/main.go
     if [ ! -f "build/team-assistant" ]; then
-        log_error "编译失败"
+        log_error "编译主服务失败"
         exit 1
     fi
-
     log_info "编译完成: build/team-assistant ($(du -h build/team-assistant | cut -f1))"
+
+    # 编译 syncworker
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/syncworker ./cmd/syncworker/main.go
+    if [ ! -f "build/syncworker" ]; then
+        log_error "编译 syncworker 失败"
+        exit 1
+    fi
+    log_info "编译完成: build/syncworker ($(du -h build/syncworker | cut -f1))"
+
+    # 编译 reindex
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/reindex ./cmd/reindex/main.go
+    if [ ! -f "build/reindex" ]; then
+        log_error "编译 reindex 失败"
+        exit 1
+    fi
+    log_info "编译完成: build/reindex ($(du -h build/reindex | cut -f1))"
 }
 
 # 初始化数据库
@@ -94,15 +110,30 @@ deploy() {
     log_info "部署到服务器..."
 
     # 创建目录
-    ssh_cmd "sudo mkdir -p ${SERVER_DIR}/etc ${SERVER_DIR}/logs && sudo chown -R ubuntu:ubuntu ${SERVER_DIR}"
+    ssh_cmd "sudo mkdir -p ${SERVER_DIR}/etc ${SERVER_DIR}/logs ${SERVER_DIR}/bin && sudo chown -R ubuntu:ubuntu ${SERVER_DIR}"
 
-    # 上传文件
-    log_info "上传可执行文件..."
+    # 上传主服务
+    log_info "上传主服务..."
     scp_cmd build/team-assistant "${SERVER_USER}@${SERVER_HOST}:/tmp/"
     ssh_cmd "sudo mv /tmp/team-assistant ${SERVER_DIR}/ && sudo chmod +x ${SERVER_DIR}/team-assistant"
 
+    # 上传 syncworker
+    log_info "上传 syncworker..."
+    scp_cmd build/syncworker "${SERVER_USER}@${SERVER_HOST}:/tmp/"
+    ssh_cmd "sudo mv /tmp/syncworker ${SERVER_DIR}/bin/ && sudo chmod +x ${SERVER_DIR}/bin/syncworker"
+
+    # 上传 reindex
+    log_info "上传 reindex..."
+    scp_cmd build/reindex "${SERVER_USER}@${SERVER_HOST}:/tmp/"
+    ssh_cmd "sudo mv /tmp/reindex ${SERVER_DIR}/bin/ && sudo chmod +x ${SERVER_DIR}/bin/reindex"
+
+    # 上传配置文件（使用服务器专用配置）
     log_info "上传配置文件..."
-    scp_cmd etc/config.yaml "${SERVER_USER}@${SERVER_HOST}:/tmp/"
+    if [ -f "etc/config.server.yaml" ]; then
+        scp_cmd etc/config.server.yaml "${SERVER_USER}@${SERVER_HOST}:/tmp/config.yaml"
+    else
+        scp_cmd etc/config.yaml "${SERVER_USER}@${SERVER_HOST}:/tmp/config.yaml"
+    fi
     ssh_cmd "sudo mv /tmp/config.yaml ${SERVER_DIR}/etc/"
 
     log_info "部署完成"

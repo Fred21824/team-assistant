@@ -185,8 +185,21 @@ type SearchResult struct {
 	Score      float32   `json:"score"`
 }
 
-// Search 语义搜索
+// SearchOptions 搜索选项
+type SearchOptions struct {
+	ChatID     string     // 群ID过滤
+	SenderName string     // 发送者名称过滤
+	StartTime  *time.Time // 开始时间
+	EndTime    *time.Time // 结束时间
+}
+
+// Search 语义搜索（简单版本，向后兼容）
 func (s *RAGService) Search(ctx context.Context, query string, limit int, chatID string) ([]SearchResult, error) {
+	return s.SearchWithOptions(ctx, query, limit, SearchOptions{ChatID: chatID})
+}
+
+// SearchWithOptions 带选项的语义搜索
+func (s *RAGService) SearchWithOptions(ctx context.Context, query string, limit int, opts SearchOptions) ([]SearchResult, error) {
 	if !s.enabled {
 		return nil, nil
 	}
@@ -198,15 +211,46 @@ func (s *RAGService) Search(ctx context.Context, query string, limit int, chatID
 	}
 
 	// 构建过滤条件
-	var filter map[string]interface{}
-	if chatID != "" {
-		filter = map[string]interface{}{
-			"must": []map[string]interface{}{
-				{
-					"key":   "chat_id",
-					"match": map[string]interface{}{"value": chatID},
-				},
+	var mustFilters []map[string]interface{}
+
+	// 群ID过滤
+	if opts.ChatID != "" {
+		mustFilters = append(mustFilters, map[string]interface{}{
+			"key":   "chat_id",
+			"match": map[string]interface{}{"value": opts.ChatID},
+		})
+	}
+
+	// 发送者名称过滤（模糊匹配）
+	if opts.SenderName != "" {
+		mustFilters = append(mustFilters, map[string]interface{}{
+			"key":   "sender_name",
+			"match": map[string]interface{}{"text": opts.SenderName},
+		})
+	}
+
+	// 时间范围过滤
+	if opts.StartTime != nil {
+		mustFilters = append(mustFilters, map[string]interface{}{
+			"key": "created_at",
+			"range": map[string]interface{}{
+				"gte": opts.StartTime.Format(time.RFC3339),
 			},
+		})
+	}
+	if opts.EndTime != nil {
+		mustFilters = append(mustFilters, map[string]interface{}{
+			"key": "created_at",
+			"range": map[string]interface{}{
+				"lte": opts.EndTime.Format(time.RFC3339),
+			},
+		})
+	}
+
+	var filter map[string]interface{}
+	if len(mustFilters) > 0 {
+		filter = map[string]interface{}{
+			"must": mustFilters,
 		}
 	}
 

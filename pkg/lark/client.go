@@ -409,14 +409,18 @@ func (c *Client) SendMessageToUser(ctx context.Context, openID, msgType, content
 	return nil
 }
 
-// DownloadImage 下载图片，返回 base64 编码的图片数据
-func (c *Client) DownloadImage(ctx context.Context, imageKey string) ([]byte, error) {
+// DownloadMessageResource 下载消息中的资源文件（图片、文件等）
+// 使用 /im/v1/messages/{message_id}/resources/{file_key} 接口
+func (c *Client) DownloadMessageResource(ctx context.Context, messageID, fileKey, resourceType string) ([]byte, error) {
 	token, err := c.GetTenantAccessToken(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	url := fmt.Sprintf("%s/open-apis/im/v1/images/%s", c.domain, imageKey)
+	// 使用正确的 API: 获取消息中的资源文件
+	// resourceType: image 或 file
+	url := fmt.Sprintf("%s/open-apis/im/v1/messages/%s/resources/%s?type=%s",
+		c.domain, messageID, fileKey, resourceType)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -432,15 +436,398 @@ func (c *Client) DownloadImage(ctx context.Context, imageKey string) ([]byte, er
 
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("download image failed: status=%d, body=%s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("download resource failed: status=%d, body=%s", resp.StatusCode, string(body))
 	}
 
-	imageData, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read image data failed: %w", err)
+		return nil, fmt.Errorf("read resource data failed: %w", err)
 	}
 
-	return imageData, nil
+	return data, nil
+}
+
+// DownloadImage 下载图片（保留旧接口兼容，但推荐使用 DownloadMessageResource）
+func (c *Client) DownloadImage(ctx context.Context, messageID, imageKey string) ([]byte, error) {
+	return c.DownloadMessageResource(ctx, messageID, imageKey, "image")
+}
+
+// ChatMember 群成员信息
+type ChatMember struct {
+	MemberID     string `json:"member_id"`
+	MemberIDType string `json:"member_id_type"`
+	Name         string `json:"name"`
+	TenantKey    string `json:"tenant_key"`
+}
+
+// GetChatMembers 获取群成员列表（用于获取用户名称）
+func (c *Client) GetChatMembers(ctx context.Context, chatID string) (map[string]string, error) {
+	token, err := c.GetTenantAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	members := make(map[string]string) // open_id -> name
+	pageToken := ""
+
+	for {
+		url := fmt.Sprintf("%s/open-apis/im/v1/chats/%s/members?member_id_type=open_id&page_size=100",
+			c.domain, chatID)
+		if pageToken != "" {
+			url += "&page_token=" + pageToken
+		}
+
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		var result struct {
+			Code int    `json:"code"`
+			Msg  string `json:"msg"`
+			Data struct {
+				Items     []ChatMember `json:"items"`
+				HasMore   bool         `json:"has_more"`
+				PageToken string       `json:"page_token"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return nil, err
+		}
+
+		if result.Code != 0 {
+			return nil, fmt.Errorf("get chat members failed: %s", result.Msg)
+		}
+
+		for _, m := range result.Data.Items {
+			members[m.MemberID] = m.Name
+		}
+
+		if !result.Data.HasMore {
+			break
+		}
+		pageToken = result.Data.PageToken
+	}
+
+	return members, nil
+}
+
+// ======================== Bitable (多维表格) API ========================
+
+// BitableRecord 多维表格记录
+type BitableRecord struct {
+	RecordID string                 `json:"record_id"`
+	Fields   map[string]interface{} `json:"fields"`
+}
+
+// BitableSearchResult 多维表格搜索结果
+type BitableSearchResult struct {
+	Total    int              `json:"total"`
+	HasMore  bool             `json:"has_more"`
+	Records  []*BitableRecord `json:"records"`
+	PageToken string          `json:"page_token"`
+}
+
+// GetBitableRecords 获取多维表格记录
+func (c *Client) GetBitableRecords(ctx context.Context, appToken, tableID string, pageSize int, pageToken string) (*BitableSearchResult, error) {
+	token, err := c.GetTenantAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/open-apis/bitable/v1/apps/%s/tables/%s/records?page_size=%d",
+		c.domain, appToken, tableID, pageSize)
+	if pageToken != "" {
+		url += "&page_token=" + pageToken
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Total     int              `json:"total"`
+			HasMore   bool             `json:"has_more"`
+			Items     []*BitableRecord `json:"items"`
+			PageToken string           `json:"page_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	if result.Code != 0 {
+		return nil, fmt.Errorf("get bitable records failed: %s", result.Msg)
+	}
+
+	return &BitableSearchResult{
+		Total:     result.Data.Total,
+		HasMore:   result.Data.HasMore,
+		Records:   result.Data.Items,
+		PageToken: result.Data.PageToken,
+	}, nil
+}
+
+// SearchBitableRecords 搜索多维表格记录（支持筛选条件）
+func (c *Client) SearchBitableRecords(ctx context.Context, appToken, tableID string, filter string, pageSize int) (*BitableSearchResult, error) {
+	token, err := c.GetTenantAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/open-apis/bitable/v1/apps/%s/tables/%s/records/search",
+		c.domain, appToken, tableID)
+
+	body := map[string]interface{}{
+		"page_size": pageSize,
+	}
+	if filter != "" {
+		body["filter"] = map[string]interface{}{
+			"conjunction": "and",
+			"conditions": []map[string]interface{}{
+				{
+					"field_name": "站点前缀",
+					"operator":   "contains",
+					"value":      []string{filter},
+				},
+			},
+		}
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Total     int              `json:"total"`
+			HasMore   bool             `json:"has_more"`
+			Items     []*BitableRecord `json:"items"`
+			PageToken string           `json:"page_token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	if result.Code != 0 {
+		return nil, fmt.Errorf("search bitable records failed: %s", result.Msg)
+	}
+
+	return &BitableSearchResult{
+		Total:    result.Data.Total,
+		HasMore:  result.Data.HasMore,
+		Records:  result.Data.Items,
+	}, nil
+}
+
+// GetSiteInfoByPrefix 根据站点前缀查询站点信息
+func (c *Client) GetSiteInfoByPrefix(ctx context.Context, appToken, tableID, prefix string) (*BitableRecord, error) {
+	token, err := c.GetTenantAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/open-apis/bitable/v1/apps/%s/tables/%s/records/search",
+		c.domain, appToken, tableID)
+
+	body := map[string]interface{}{
+		"page_size": 1,
+		"filter": map[string]interface{}{
+			"conjunction": "and",
+			"conditions": []map[string]interface{}{
+				{
+					"field_name": "站点前缀",
+					"operator":   "is",
+					"value":      []string{prefix},
+				},
+			},
+		},
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []*BitableRecord `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	if result.Code != 0 {
+		return nil, fmt.Errorf("search site info failed: %s", result.Msg)
+	}
+
+	if len(result.Data.Items) == 0 {
+		return nil, nil
+	}
+
+	return result.Data.Items[0], nil
+}
+
+// BitableField 多维表格字段信息
+type BitableField struct {
+	FieldID   string `json:"field_id"`
+	FieldName string `json:"field_name"`
+	Type      int    `json:"type"`
+}
+
+// GetBitableFields 获取多维表格字段列表
+func (c *Client) GetBitableFields(ctx context.Context, appToken, tableID string) ([]*BitableField, error) {
+	token, err := c.GetTenantAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/open-apis/bitable/v1/apps/%s/tables/%s/fields",
+		c.domain, appToken, tableID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []*BitableField `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	if result.Code != 0 {
+		return nil, fmt.Errorf("get bitable fields failed: %s", result.Msg)
+	}
+
+	return result.Data.Items, nil
+}
+
+// GetSiteInfoBySiteID 根据站点ID查询站点信息
+func (c *Client) GetSiteInfoBySiteID(ctx context.Context, appToken, tableID, siteID string) (*BitableRecord, error) {
+	token, err := c.GetTenantAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/open-apis/bitable/v1/apps/%s/tables/%s/records/search",
+		c.domain, appToken, tableID)
+
+	body := map[string]interface{}{
+		"page_size": 1,
+		"filter": map[string]interface{}{
+			"conjunction": "and",
+			"conditions": []map[string]interface{}{
+				{
+					"field_name": "站点ID",
+					"operator":   "is",
+					"value":      []string{siteID},
+				},
+			},
+		},
+	}
+	jsonBody, _ := json.Marshal(body)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(jsonBody))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			Items []*BitableRecord `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	if result.Code != 0 {
+		return nil, fmt.Errorf("search site info by ID failed: %s", result.Msg)
+	}
+
+	if len(result.Data.Items) == 0 {
+		return nil, nil
+	}
+
+	return result.Data.Items[0], nil
 }
 
 // GetChatHistory 获取群聊历史消息（支持时间范围）

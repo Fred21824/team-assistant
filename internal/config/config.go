@@ -10,6 +10,7 @@ type Config struct {
 	LLM      LLMConfig      `yaml:"LLM"`
 	Dify     DifyConfig     `yaml:"Dify"`
 	VectorDB VectorDBConfig `yaml:"VectorDB"`
+	Bitable  BitableConfig  `yaml:"Bitable"`
 }
 
 // ServerConfig 服务器配置
@@ -57,6 +58,11 @@ type LLMConfig struct {
 	APIKey   string `yaml:"APIKey"`
 	Endpoint string `yaml:"Endpoint"` // API端点
 	Model    string `yaml:"Model"`    // 模型名称
+	// 代理配置（用于香港等受限地区访问 Claude API）
+	ProxyHost     string `yaml:"ProxyHost"`     // 代理主机，如 52.41.128.82
+	ProxyPort     int    `yaml:"ProxyPort"`     // 代理端口，如 9662
+	ProxyUser     string `yaml:"ProxyUser"`     // 代理用户名
+	ProxyPassword string `yaml:"ProxyPassword"` // 代理密码
 }
 
 // DifyConfig Dify 配置
@@ -74,4 +80,11 @@ type VectorDBConfig struct {
 	OllamaEndpoint   string `yaml:"OllamaEndpoint"`   // Ollama 地址，如 http://localhost:11434
 	EmbeddingModel   string `yaml:"EmbeddingModel"`   // Embedding 模型，默认 nomic-embed-text
 	CollectionName   string `yaml:"CollectionName"`   // 集合名称，默认 messages
+}
+
+// BitableConfig 多维表格配置
+type BitableConfig struct {
+	Enabled  bool   `yaml:"Enabled"`  // 是否启用 Bitable 查询
+	AppToken string `yaml:"AppToken"` // 多维表格 App Token
+	TableID  string `yaml:"TableID"`  // 表格 ID
 }

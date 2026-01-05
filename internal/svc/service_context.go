@@ -101,7 +101,17 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 
 	var llmClient *llm.Client
 	if c.LLM.APIKey != "" {
-		llmClient = llm.NewClient(c.LLM.APIKey, c.LLM.Endpoint, c.LLM.Model)
+		// 如果配置了代理，使用代理
+		var proxyConfig *llm.ProxyConfig
+		if c.LLM.ProxyHost != "" && c.LLM.ProxyPort > 0 {
+			proxyConfig = &llm.ProxyConfig{
+				Host:     c.LLM.ProxyHost,
+				Port:     c.LLM.ProxyPort,
+				User:     c.LLM.ProxyUser,
+				Password: c.LLM.ProxyPassword,
+			}
+		}
+		llmClient = llm.NewClientWithProxy(c.LLM.APIKey, c.LLM.Endpoint, c.LLM.Model, proxyConfig)
 	}
 
 	var difyClient *dify.Client

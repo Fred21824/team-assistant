@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -206,6 +207,11 @@ func (s *MessageSyncer) syncMessages(ctx context.Context, task *model.MessageSyn
 func (s *MessageSyncer) getUserName(ctx context.Context, openID string) string {
 	if openID == "" {
 		return ""
+	}
+
+	// 跳过机器人ID（以 cli_ 开头的是机器人）
+	if strings.HasPrefix(openID, "cli_") {
+		return "机器人"
 	}
 
 	// 先检查缓存

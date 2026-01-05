@@ -31,7 +31,19 @@
       "Bash(ollama pull:*)",
       "Bash(tar:*)",
       "Bash(wc:*)",
-      "Bash(sudo -S brew install:*)"
+      "Bash(sudo -S brew install:*)",
+      "Bash(docker --version:*)",
+      "Bash(brew --version:*)",
+      "Bash(while ps aux)",
+      "Bash(do sleep 5)",
+      "Bash(done)",
+      "Bash(sudo -S echo:*)",
+      "Bash(sudo -S rm -rf /Library/PrivilegedHelperTools/com.docker.vmnetd)",
+      "Bash(sudo -S launchctl:*)",
+      "Bash(tail:*)",
+      "Bash(go run:*)",
+      "Bash(ls:*)",
+      "Bash(python3:*)"
     ]
   }
 }

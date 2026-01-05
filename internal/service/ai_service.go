@@ -693,7 +693,8 @@ func (s *AIService) getTimeRange(tr llm.TimeRange) (time.Time, time.Time) {
 		lastMonthStart := thisMonthStart.AddDate(0, -1, 0)
 		return lastMonthStart, thisMonthStart
 	default:
-		return today.AddDate(0, 0, -7), now
+		// 默认查询最近3年的消息
+		return today.AddDate(-3, 0, 0), now
 	}
 }
 

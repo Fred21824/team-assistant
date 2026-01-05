@@ -1375,13 +1375,8 @@ func (hp *HybridProcessor) getTimeRange(tr llm.TimeRange) (time.Time, time.Time)
 		lastMonthStart := thisMonthStart.AddDate(0, -1, 0)
 		return lastMonthStart, thisMonthStart
 	default:
-		// 默认查询本周的消息（更合理的默认值）
-		weekday := int(now.Weekday())
-		if weekday == 0 {
-			weekday = 7
-		}
-		weekStart := today.AddDate(0, 0, -(weekday - 1))
-		return weekStart, now
+		// 默认查询最近3年的消息（告警查询需要更大的时间范围）
+		return now.AddDate(-3, 0, 0), now
 	}
 }
 

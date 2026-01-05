@@ -324,9 +324,13 @@ func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChat
 	// 站点查询应该走正常流程，不要从上下文回答
 	isSiteQueryLike := hp.mightBeSiteQuery(originalQuery)
 
+	// 检查是否是扩展查询（如"其他站呢"、"还有哪些"）
+	// 扩展查询需要重新搜索数据库，不能只从上一轮回答中提取
+	isExpandQueryLike := hp.isExpandQuery(originalQuery)
+
 	// 如果是追问且有上一轮回答，直接让 LLM 从上一轮回答中提取信息
-	// 但如果可能是站点查询，跳过追问逻辑，走正常意图解析
-	if isFollowUp && prevContext != nil && prevContext.LastAnswer != "" && !isSiteQueryLike {
+	// 但如果可能是站点查询或扩展查询，跳过追问逻辑，走正常意图解析
+	if isFollowUp && prevContext != nil && prevContext.LastAnswer != "" && !isSiteQueryLike && !isExpandQueryLike {
 		log.Printf("Follow-up question detected (query: %s), answering from previous context", originalQuery)
 		answer, err := hp.answerFollowUpFromContext(ctx, originalQuery, prevContext)
 		if err == nil && answer != "" {
@@ -340,6 +344,15 @@ func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChat
 	if restoredQuery != query {
 		log.Printf("Restored query from '%s' to '%s'", query, restoredQuery)
 		query = restoredQuery
+	}
+
+	// 如果是扩展查询且有上下文，从上下文中提取关键词构建新查询
+	if isExpandQueryLike && prevContext != nil && prevContext.LastQuery != "" {
+		expandedQuery := hp.buildExpandedQuery(originalQuery, prevContext)
+		if expandedQuery != "" {
+			log.Printf("Expand query detected, building expanded query: '%s' -> '%s'", originalQuery, expandedQuery)
+			query = expandedQuery
+		}
 	}
 
 	// 解析用户意图
@@ -974,6 +987,72 @@ func (hp *HybridProcessor) mightBeSiteQuery(query string) bool {
 	}
 
 	return false
+}
+
+// isExpandQuery 检测是否是扩展查询，需要重新搜索数据库
+// 例如："其他站呢"、"还有哪些"、"其他的告警"等
+// 这类查询不应该只从上一轮回答中提取，而应该扩展搜索范围
+func (hp *HybridProcessor) isExpandQuery(query string) bool {
+	expandPatterns := []string{
+		"其他站", "别的站", "其他的站", "其它站",
+		"还有哪些", "还有什么", "还有其他",
+		"其他的", "别的", "其它的",
+		"全部的", "所有的", "所有站",
+		"更多", "完整的", "详细列表",
+	}
+
+	queryLower := strings.ToLower(query)
+	for _, pattern := range expandPatterns {
+		if strings.Contains(queryLower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// buildExpandedQuery 根据上下文构建扩展查询
+// 当用户问"其他站呢？"时，从上下文中提取关键词，构建搜索所有站点的查询
+func (hp *HybridProcessor) buildExpandedQuery(originalQuery string, prevContext *ConversationContext) string {
+	if prevContext == nil || prevContext.LastQuery == "" {
+		return ""
+	}
+
+	// 从上一次查询中提取关键词
+	lastQuery := prevContext.LastQuery
+
+	// 提取告警类型关键词
+	alertKeywords := []string{
+		"慢请求", "支付慢请求", "慢请求告警",
+		"支付失败", "代付失败", "余额不足",
+		"场馆操作失败", "场馆错误",
+		"告警", "错误", "异常", "失败",
+	}
+
+	var foundKeywords []string
+	for _, kw := range alertKeywords {
+		if strings.Contains(lastQuery, kw) {
+			foundKeywords = append(foundKeywords, kw)
+		}
+	}
+
+	// 如果没找到关键词，尝试从上一次回答中提取
+	if len(foundKeywords) == 0 && prevContext.LastAnswer != "" {
+		for _, kw := range alertKeywords {
+			if strings.Contains(prevContext.LastAnswer, kw) {
+				foundKeywords = append(foundKeywords, kw)
+				break // 只取第一个匹配的
+			}
+		}
+	}
+
+	// 构建新查询
+	if len(foundKeywords) > 0 {
+		// 使用找到的关键词构建查询所有站点的问题
+		return fmt.Sprintf("所有站点的%s告警", foundKeywords[0])
+	}
+
+	// 如果实在找不到关键词，返回通用查询
+	return "所有站点的告警"
 }
 
 // isRoleQuery 检测是否是询问人员角色的问题

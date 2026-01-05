@@ -102,12 +102,13 @@ func NewHybridProcessor(svcCtx *svc.ServiceContext) *HybridProcessor {
 
 // ProcessQuery 处理用户查询
 // chatID 是当前会话所在的群ID（群聊时）或用户ID（私聊时）
-func (hp *HybridProcessor) ProcessQuery(ctx context.Context, chatID, query string) (string, error) {
+func (hp *HybridProcessor) ProcessQuery(ctx context.Context, chatID, query string, isReplyFollowUp bool) (string, error) {
 	if hp.useDify && hp.difyClient != nil {
 		return hp.processWithDify(ctx, chatID, query)
 	}
 	// 传递 chatID 以便搜索时限定范围
-	return hp.processWithNativeLLM(ctx, chatID, query)
+	// isReplyFollowUp: 用户通过飞书回复功能发送的消息（有 root_id），才视为追问
+	return hp.processWithNativeLLM(ctx, chatID, query, isReplyFollowUp)
 }
 
 // ProcessImageQuery 处理带图片的查询
@@ -215,9 +216,9 @@ func (hp *HybridProcessor) processWithDify(ctx context.Context, userID, query st
 	resp, err := hp.difyClient.Chat(ctx, req)
 	if err != nil {
 		log.Printf("Dify chat error: %v, falling back to native LLM", err)
-		// 回退到原生 LLM
+		// 回退到原生 LLM（Dify 模式下无法获取 rootID，默认不视为追问）
 		if hp.llmClient != nil {
-			return hp.processWithNativeLLM(ctx, userID, query)
+			return hp.processWithNativeLLM(ctx, userID, query, false)
 		}
 		return "抱歉，AI 服务暂时不可用，请稍后重试。", nil
 	}
@@ -401,7 +402,7 @@ func (hp *HybridProcessor) saveContextWithAnswer(userID string, query string, an
 
 // processWithNativeLLM 使用原生 LLM 处理
 // currentChatID 是当前会话所在的群ID，用于限定搜索范围
-func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChatID, query string) (string, error) {
+func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChatID, query string, isReplyFollowUp bool) (string, error) {
 	// 获取用户ID（私聊时用currentChatID，群聊时也用）
 	userID := currentChatID
 
@@ -409,8 +410,15 @@ func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChat
 	originalQuery := query
 	restoredQuery, prevContext := hp.getOrRestoreContext(userID, query)
 
-	// 判断是否是追问：明确的追问模式 或 可能的追问（短查询+有上下文）
-	isFollowUp := hp.isFollowUpQuestion(originalQuery) || hp.isLikelyFollowUp(originalQuery, prevContext)
+	// 判断是否是追问：
+	// 新逻辑：优先使用飞书的回复机制（root_id）来判断是否是追问
+	// 如果用户通过飞书的"回复"功能发送消息（有 root_id），才视为追问
+	// 否则即使是短查询（如"asik呢"），也当作新查询处理，进行完整搜索
+	isFollowUp := isReplyFollowUp && prevContext != nil && prevContext.LastAnswer != ""
+
+	// 日志记录追问判断结果
+	log.Printf("Follow-up detection: isReplyFollowUp=%v, hasContext=%v, isFollowUp=%v, query=%s",
+		isReplyFollowUp, prevContext != nil, isFollowUp, originalQuery)
 
 	// 检查是否可能是站点查询（包含纯数字或字母+数字组合）
 	// 站点查询应该走正常流程，不要从上下文回答

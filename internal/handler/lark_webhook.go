@@ -42,9 +42,9 @@ type ImageContext struct {
 
 // LarkWebhookHandler 处理飞书事件回调
 type LarkWebhookHandler struct {
-	svcCtx       *svc.ServiceContext
-	processor    *ai.HybridProcessor
-	msgSyncer    MessageSyncer
+	svcCtx    *svc.ServiceContext
+	processor *ai.HybridProcessor
+	msgSyncer MessageSyncer
 	// 用户名缓存 (chatID -> (openID -> name))
 	userCache   map[string]map[string]string
 	userCacheMu sync.RWMutex
@@ -287,10 +287,10 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 		return
 	}
 
-	log.Printf("Received bot message: %s", content)
+	log.Printf("Received bot message: %s, rootID: %s", content, event.Message.RootID)
 
-	// 处理用户查询
-	safeGo(func() { h.processQuery(event.Message.ChatID, event.Message.MessageID, content) })
+	// 处理用户查询（传递 rootID 用于判断是否是回复追问）
+	safeGo(func() { h.processQuery(event.Message.ChatID, event.Message.MessageID, event.Message.RootID, content) })
 }
 
 // getUserName 获取用户名（带缓存）
@@ -422,7 +422,7 @@ func (h *LarkWebhookHandler) storeMessage(event *lark.MessageReceiveEvent, conte
 }
 
 // processQuery 处理用户查询
-func (h *LarkWebhookHandler) processQuery(chatID, messageID, query string) {
+func (h *LarkWebhookHandler) processQuery(chatID, messageID, rootID, query string) {
 	ctx := context.Background()
 
 	log.Printf("Processing query: %s", query)
@@ -443,7 +443,9 @@ func (h *LarkWebhookHandler) processQuery(chatID, messageID, query string) {
 	}
 
 	// 使用混合处理器处理查询
-	reply, err := h.processor.ProcessQuery(ctx, chatID, query)
+	// 传递 rootID，用于判断是否是回复追问（只有有 rootID 的才视为追问）
+	isReplyFollowUp := rootID != ""
+	reply, err := h.processor.ProcessQuery(ctx, chatID, query, isReplyFollowUp)
 	if err != nil {
 		log.Printf("Query processing error: %v", err)
 		reply = "处理请求时出错，请稍后重试。"
@@ -514,11 +516,12 @@ func (h *LarkWebhookHandler) handlePrivateCommand(event *lark.MessageReceiveEven
 	}
 }
 
-// handleAIQuery 处理 AI 查询
+// handleAIQuery 处理 AI 查询（私聊场景）
 func (h *LarkWebhookHandler) handleAIQuery(ctx context.Context, messageID, userID, query string) {
 	log.Printf("Processing AI query from %s: %s", userID, query)
 
-	response, err := h.processor.ProcessQuery(ctx, userID, query)
+	// 私聊场景下不使用 root_id 追问逻辑，默认不视为追问
+	response, err := h.processor.ProcessQuery(ctx, userID, query, false)
 	if err != nil {
 		log.Printf("AI query error: %v", err)
 		h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", "处理请求时出错，请稍后重试")

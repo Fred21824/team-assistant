@@ -293,6 +293,8 @@ func (hp *HybridProcessor) processWithNativeLLM(ctx context.Context, currentChat
 	switch parsed.Intent {
 	case llm.IntentSiteQuery:
 		return hp.handleSiteQueryByLLM(ctx, parsed)
+	case llm.IntentGroupTimeline:
+		return hp.handleGroupTimeline(ctx, parsed, currentChatID)
 	case llm.IntentQueryWorkload, llm.IntentQueryCommits:
 		return hp.handleWorkloadQuery(ctx, parsed)
 	case llm.IntentSearchMessage:
@@ -1455,4 +1457,393 @@ func getFieldString(fields map[string]interface{}, key string) string {
 		}
 	}
 	return ""
+}
+
+// ======================== 群历程查询 ========================
+
+// WeeklySummary 周总结数据
+type WeeklySummary struct {
+	WeekStart    time.Time `json:"week_start"`
+	WeekEnd      time.Time `json:"week_end"`
+	Summary      string    `json:"summary"`
+	MainTopics   []string  `json:"main_topics"`
+	Decisions    []string  `json:"decisions"`
+	Milestones   []string  `json:"milestones"`
+	Participants []string  `json:"participants"`
+	MessageCount int       `json:"message_count"`
+}
+
+// TimelineReport 时间线报告
+type TimelineReport struct {
+	GroupName       string          `json:"group_name"`
+	StartDate       time.Time       `json:"start_date"`
+	EndDate         time.Time       `json:"end_date"`
+	TotalWeeks      int             `json:"total_weeks"`
+	TotalMessages   int             `json:"total_messages"`
+	WeeklySummaries []WeeklySummary `json:"weekly_summaries"`
+}
+
+// handleGroupTimeline 处理群历程查询
+func (hp *HybridProcessor) handleGroupTimeline(ctx context.Context, parsed *llm.ParsedQuery, currentChatID string) (string, error) {
+	// 1. 确定目标群
+	chatID, groupName := hp.resolveTargetGroup(ctx, currentChatID, parsed.TargetGroup)
+	if chatID == "" {
+		return "请指定要查询历程的群，或在群聊中直接提问。", nil
+	}
+
+	log.Printf("Processing group timeline for: %s (chatID: %s)", groupName, chatID)
+
+	// 2. 获取群的第一条消息，确定时间范围
+	firstMsg, err := hp.svcCtx.MessageModel.GetGroupFirstMessage(ctx, chatID)
+	if err != nil {
+		log.Printf("Failed to get first message: %v", err)
+		return fmt.Sprintf("「%s」群暂无消息记录。", groupName), nil
+	}
+
+	startDate := firstMsg.CreatedAt
+	endDate := time.Now()
+
+	// 3. 计算周数
+	weekCount := int(endDate.Sub(startDate).Hours()/24/7) + 1
+	log.Printf("Timeline spans %d weeks (from %s to %s)", weekCount, startDate.Format("2006-01-02"), endDate.Format("2006-01-02"))
+
+	// 4. 分周处理并生成总结
+	weeklySummaries, err := hp.generateWeeklySummaries(ctx, chatID, startDate, endDate)
+	if err != nil {
+		log.Printf("Failed to generate weekly summaries: %v", err)
+		return "生成历程总结时出错，请稍后重试。", err
+	}
+
+	if len(weeklySummaries) == 0 {
+		return fmt.Sprintf("「%s」群暂无足够的消息来生成历程报告。", groupName), nil
+	}
+
+	// 5. 汇总所有周总结，生成最终报告
+	report := TimelineReport{
+		GroupName:       groupName,
+		StartDate:       startDate,
+		EndDate:         endDate,
+		TotalWeeks:      len(weeklySummaries),
+		WeeklySummaries: weeklySummaries,
+	}
+
+	// 计算总消息数
+	for _, ws := range weeklySummaries {
+		report.TotalMessages += ws.MessageCount
+	}
+
+	// 6. 使用LLM生成最终的历程报告
+	finalReport, err := hp.generateFinalTimelineReport(ctx, parsed.RawQuery, report)
+	if err != nil {
+		log.Printf("Failed to generate final report: %v", err)
+		// 降级：直接返回周总结列表
+		return hp.formatWeeklySummariesFallback(report), nil
+	}
+
+	return finalReport, nil
+}
+
+// resolveTargetGroup 解析目标群
+func (hp *HybridProcessor) resolveTargetGroup(ctx context.Context, currentChatID, targetGroup string) (chatID, groupName string) {
+	// 优先使用用户指定的群
+	if targetGroup != "" {
+		foundID, foundName := hp.findChatByName(ctx, targetGroup)
+		if foundID != "" {
+			return foundID, foundName
+		}
+	}
+
+	// 如果是群聊，使用当前群
+	if !isPrivateChat(currentChatID) {
+		// 获取群名
+		group, err := hp.svcCtx.GroupModel.FindByChatID(ctx, currentChatID)
+		if err == nil && group.ChatName.Valid {
+			return currentChatID, group.ChatName.String
+		}
+		return currentChatID, "当前群"
+	}
+
+	return "", ""
+}
+
+// generateWeeklySummaries 分周生成总结
+func (hp *HybridProcessor) generateWeeklySummaries(ctx context.Context, chatID string, startDate, endDate time.Time) ([]WeeklySummary, error) {
+	var summaries []WeeklySummary
+
+	// 计算每周的开始日期（周一）
+	weekStart := startDate.Truncate(24 * time.Hour)
+	// 调整到周一
+	for weekStart.Weekday() != time.Monday {
+		weekStart = weekStart.AddDate(0, 0, -1)
+	}
+
+	// 限制处理的最大周数（避免处理过多历史数据）
+	maxWeeks := 52 // 最多处理52周
+	processedWeeks := 0
+
+	for weekStart.Before(endDate) && processedWeeks < maxWeeks {
+		weekEnd := weekStart.AddDate(0, 0, 7)
+		if weekEnd.After(endDate) {
+			weekEnd = endDate
+		}
+
+		// 获取本周消息
+		messages, err := hp.svcCtx.MessageModel.GetMessagesByDateRange(ctx, chatID, weekStart, weekEnd, 200)
+		if err != nil {
+			log.Printf("Failed to get messages for week %s: %v", weekStart.Format("2006-01-02"), err)
+			weekStart = weekEnd
+			processedWeeks++
+			continue
+		}
+
+		// 跳过没有消息的周
+		if len(messages) == 0 {
+			weekStart = weekEnd
+			processedWeeks++
+			continue
+		}
+
+		// 获取本周参与者
+		participants, _ := hp.svcCtx.MessageModel.GetDistinctSendersByDateRange(ctx, chatID, weekStart, weekEnd)
+
+		// 生成本周总结
+		weeklySummary, err := hp.summarizeWeekMessages(ctx, messages, weekStart, weekEnd)
+		if err != nil {
+			log.Printf("Failed to summarize week %s: %v", weekStart.Format("2006-01-02"), err)
+			// 即使LLM失败，也记录基本信息
+			weeklySummary = &WeeklySummary{
+				WeekStart:    weekStart,
+				WeekEnd:      weekEnd,
+				Summary:      fmt.Sprintf("本周有 %d 条消息", len(messages)),
+				Participants: participants,
+				MessageCount: len(messages),
+			}
+		} else {
+			weeklySummary.WeekStart = weekStart
+			weeklySummary.WeekEnd = weekEnd
+			weeklySummary.Participants = participants
+			weeklySummary.MessageCount = len(messages)
+		}
+
+		summaries = append(summaries, *weeklySummary)
+		log.Printf("Week %s: %d messages, summary generated", weekStart.Format("2006-01-02"), len(messages))
+
+		weekStart = weekEnd
+		processedWeeks++
+	}
+
+	return summaries, nil
+}
+
+// summarizeWeekMessages 总结单周消息
+func (hp *HybridProcessor) summarizeWeekMessages(ctx context.Context, messages []*model.ChatMessage, weekStart, weekEnd time.Time) (*WeeklySummary, error) {
+	if len(messages) == 0 {
+		return nil, nil
+	}
+
+	// 限制消息数量，避免 Token 超限
+	maxMessages := 100
+	if len(messages) > maxMessages {
+		// 均匀采样
+		step := len(messages) / maxMessages
+		var sampled []*model.ChatMessage
+		for i := 0; i < len(messages); i += step {
+			sampled = append(sampled, messages[i])
+		}
+		messages = sampled
+	}
+
+	// 格式化消息
+	var msgTexts []string
+	for _, msg := range messages {
+		senderName := "未知"
+		if msg.SenderName.Valid && msg.SenderName.String != "" {
+			senderName = msg.SenderName.String
+		}
+		content := ""
+		if msg.Content.Valid {
+			content = msg.Content.String
+		}
+		if content == "" {
+			continue
+		}
+		msgTexts = append(msgTexts, fmt.Sprintf("[%s] %s: %s",
+			msg.CreatedAt.Format("01-02 15:04"),
+			senderName,
+			content))
+	}
+
+	if len(msgTexts) == 0 {
+		return nil, nil
+	}
+
+	// 拼接消息文本，限制长度
+	messageContent := strings.Join(msgTexts, "\n")
+	if len(messageContent) > 6000 {
+		messageContent = messageContent[:6000] + "\n...(内容已截断)"
+	}
+
+	// 调用 LLM 生成周总结
+	return hp.generateWeeklySummaryWithLLM(ctx, messageContent, weekStart, weekEnd)
+}
+
+// generateWeeklySummaryWithLLM 使用 LLM 生成周总结
+func (hp *HybridProcessor) generateWeeklySummaryWithLLM(ctx context.Context, messageContent string, weekStart, weekEnd time.Time) (*WeeklySummary, error) {
+	prompt := fmt.Sprintf(`分析 %s 至 %s 这周的群聊消息，提取关键信息。
+
+消息记录：
+%s
+
+返回JSON格式（确保有效JSON）：
+{
+    "summary": "本周概述（1-2句话）",
+    "main_topics": ["主要话题1", "主要话题2"],
+    "decisions": ["重要决议1", "重要决议2"],
+    "milestones": ["里程碑事件（如有）"]
+}
+
+要求：
+1. summary: 简明概括核心内容
+2. main_topics: 最多5个主要话题
+3. decisions: 明确的决议/结论，无则空数组
+4. milestones: 重大事件（上线、发布等），无则空数组
+
+只返回JSON:`,
+		weekStart.Format("01月02日"),
+		weekEnd.Format("01月02日"),
+		messageContent)
+
+	resp, err := hp.llmClient.GenerateResponse(ctx, prompt, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// 解析 JSON 响应
+	resp = strings.TrimSpace(resp)
+	resp = strings.TrimPrefix(resp, "```json")
+	resp = strings.TrimPrefix(resp, "```")
+	resp = strings.TrimSuffix(resp, "```")
+	resp = strings.TrimSpace(resp)
+
+	var result struct {
+		Summary    string   `json:"summary"`
+		MainTopics []string `json:"main_topics"`
+		Decisions  []string `json:"decisions"`
+		Milestones []string `json:"milestones"`
+	}
+
+	if err := json.Unmarshal([]byte(resp), &result); err != nil {
+		// 解析失败时返回原始响应作为 summary
+		return &WeeklySummary{
+			Summary: resp,
+		}, nil
+	}
+
+	return &WeeklySummary{
+		Summary:    result.Summary,
+		MainTopics: result.MainTopics,
+		Decisions:  result.Decisions,
+		Milestones: result.Milestones,
+	}, nil
+}
+
+// generateFinalTimelineReport 生成最终的历程报告
+func (hp *HybridProcessor) generateFinalTimelineReport(ctx context.Context, userQuery string, report TimelineReport) (string, error) {
+	// 构建周总结摘要
+	var weekSummaries []string
+	for _, ws := range report.WeeklySummaries {
+		weekInfo := fmt.Sprintf("【%s ~ %s】(%d条消息)\n概述: %s",
+			ws.WeekStart.Format("2006-01-02"),
+			ws.WeekEnd.Format("2006-01-02"),
+			ws.MessageCount,
+			ws.Summary)
+
+		if len(ws.MainTopics) > 0 {
+			weekInfo += fmt.Sprintf("\n主题: %s", strings.Join(ws.MainTopics, "、"))
+		}
+		if len(ws.Decisions) > 0 {
+			weekInfo += fmt.Sprintf("\n决议: %s", strings.Join(ws.Decisions, "；"))
+		}
+		if len(ws.Milestones) > 0 {
+			weekInfo += fmt.Sprintf("\n里程碑: %s", strings.Join(ws.Milestones, "；"))
+		}
+		if len(ws.Participants) > 0 && len(ws.Participants) <= 10 {
+			weekInfo += fmt.Sprintf("\n参与者: %s", strings.Join(ws.Participants, "、"))
+		} else if len(ws.Participants) > 10 {
+			weekInfo += fmt.Sprintf("\n参与者: %d人", len(ws.Participants))
+		}
+		weekSummaries = append(weekSummaries, weekInfo)
+	}
+
+	summaryContent := strings.Join(weekSummaries, "\n\n")
+
+	// 限制长度
+	if len(summaryContent) > 8000 {
+		summaryContent = summaryContent[:8000] + "\n...(内容已截断)"
+	}
+
+	prompt := fmt.Sprintf(`用户问题：%s
+
+群聊信息：
+- 群名: %s
+- 起始时间: %s
+- 结束时间: %s
+- 总周数: %d 周
+- 总消息数: %d 条
+
+各周总结：
+%s
+
+请生成群历程报告。
+
+格式要求：
+1. 开头简述基本信息（起始时间、活跃周数）
+2. 按时间线列出关键阶段/里程碑
+3. 主要话题和演进
+4. 重大决议汇总（如有）
+5. 参与人员变化（如明显）
+6. 整体评价
+
+用清晰结构和标题，使用emoji增强可读性。`,
+		userQuery,
+		report.GroupName,
+		report.StartDate.Format("2006年01月02日"),
+		report.EndDate.Format("2006年01月02日"),
+		report.TotalWeeks,
+		report.TotalMessages,
+		summaryContent)
+
+	return hp.llmClient.GenerateResponse(ctx, prompt, nil)
+}
+
+// formatWeeklySummariesFallback 降级格式化（LLM失败时使用）
+func (hp *HybridProcessor) formatWeeklySummariesFallback(report TimelineReport) string {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("📅 「%s」群历程报告\n\n", report.GroupName))
+	sb.WriteString(fmt.Sprintf("📍 时间范围: %s ~ %s\n",
+		report.StartDate.Format("2006-01-02"),
+		report.EndDate.Format("2006-01-02")))
+	sb.WriteString(fmt.Sprintf("📊 统计: %d 周，共 %d 条消息\n\n",
+		report.TotalWeeks, report.TotalMessages))
+
+	sb.WriteString("=== 各周概览 ===\n\n")
+
+	for i, ws := range report.WeeklySummaries {
+		sb.WriteString(fmt.Sprintf("**第 %d 周** (%s ~ %s)\n",
+			i+1,
+			ws.WeekStart.Format("01-02"),
+			ws.WeekEnd.Format("01-02")))
+		sb.WriteString(fmt.Sprintf("消息数: %d | 参与者: %d人\n",
+			ws.MessageCount, len(ws.Participants)))
+		if ws.Summary != "" {
+			sb.WriteString(fmt.Sprintf("概述: %s\n", ws.Summary))
+		}
+		if len(ws.MainTopics) > 0 {
+			sb.WriteString(fmt.Sprintf("话题: %s\n", strings.Join(ws.MainTopics, "、")))
+		}
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }

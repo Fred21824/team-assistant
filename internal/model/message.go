@@ -458,3 +458,44 @@ func (m *MessageSyncTaskModel) GetRecentTasks(ctx context.Context, limit int) ([
 	}
 	return tasks, nil
 }
+
+// GetGroupFirstMessage 获取群的第一条消息（用于确定群的起始时间）
+func (m *ChatMessageModel) GetGroupFirstMessage(ctx context.Context, chatID string) (*ChatMessage, error) {
+	query := `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
+              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              FROM chat_messages
+              WHERE chat_id = ?
+              ORDER BY created_at ASC LIMIT 1`
+	var msg ChatMessage
+	err := m.db.QueryRowContext(ctx, query, chatID).Scan(
+		&msg.ID, &msg.MessageID, &msg.ChatID, &msg.SenderID, &msg.SenderName,
+		&msg.MemberID, &msg.MsgType, &msg.Content, &msg.RawContent, &msg.Mentions,
+		&msg.ReplyToID, &msg.IsAtBot, &msg.CreatedAt, &msg.IndexedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &msg, nil
+}
+
+// GetDistinctSendersByDateRange 获取指定时间段内的不重复发送者
+func (m *ChatMessageModel) GetDistinctSendersByDateRange(ctx context.Context, chatID string, start, end time.Time) ([]string, error) {
+	query := `SELECT DISTINCT sender_name FROM chat_messages
+              WHERE chat_id = ? AND created_at BETWEEN ? AND ?
+              AND sender_name IS NOT NULL AND sender_name != ''
+              ORDER BY sender_name`
+	rows, err := m.db.QueryContext(ctx, query, chatID, start, end)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var senders []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		senders = append(senders, name)
+	}
+	return senders, nil
+}

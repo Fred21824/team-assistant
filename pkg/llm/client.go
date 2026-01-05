@@ -23,6 +23,7 @@ const (
 	IntentQueryRequirement Intent = "query_requirement" // 查询需求进度
 	IntentQA               Intent = "qa"                // 基于聊天记录的问答
 	IntentSiteQuery        Intent = "site_query"        // 查询站点信息
+	IntentGroupTimeline    Intent = "group_timeline"    // 群历程查询
 	IntentHelp             Intent = "help"              // 帮助
 	IntentUnknown          Intent = "unknown"           // 未知意图
 )
@@ -38,6 +39,7 @@ const (
 	TimeRangeThisMonth TimeRange = "this_month"
 	TimeRangeLastMonth TimeRange = "last_month"
 	TimeRangeCustom    TimeRange = "custom"
+	TimeRangeAll       TimeRange = "all" // 全部历史（用于群历程查询）
 )
 
 // ParsedQuery 解析后的查询
@@ -218,6 +220,9 @@ func (c *Client) ParseUserQuery(ctx context.Context, query string) (*ParsedQuery
 请分析用户的问题，返回JSON格式的解析结果。
 
 支持的意图类型（按优先级排序）：
+- group_timeline: 查询群聊的发展历程、时间线、重大事件（如：这个群从什么时候开始的？群里的发展历程？有哪些重大决议？什么时候讨论了什么？历史上有哪些里程碑？需求是什么时候开始的？）
+  关键词：历程、发展过程、什么时候开始、从头、全部历史、重大决议、里程碑、时间线、发展史、演进过程
+  注意：group_timeline 用于了解群的整体历史发展，按时间段回顾；summarize 只是总结近期讨论内容
 - site_query: 查询站点信息，支持两种查询方式：
   1. 通过站点前缀查询（字母+数字组合，如l08、b01、by4、abc01等）：查询站点的详细信息
      例如："l08是什么站点？"、"by4的域名是什么？"、"查一下p03站点"
@@ -239,12 +244,13 @@ func (c *Client) ParseUserQuery(ctx context.Context, query string) (*ParsedQuery
 - unknown: 完全无法理解的问题
 
 重要判断规则：
-1. 如果用户提到了站点代号（如l08、b01、by4等字母+数字组合），优先使用 site_query 意图，并填写 site_prefix
-2. 如果用户问某个纯数字ID对应的站点（如"3040是什么站点"、"3040的前缀"），使用 site_query 意图，并填写 site_id
-3. 如果用户问"谁"、"什么"、"为什么"、"怎么"等问题（但不涉及站点），优先使用 qa 意图
-4. 如果问题涉及项目、需求、功能、Bug、错误、支付、人员等具体主题，优先使用 qa 意图
-5. 只有明确要求"搜索"或"查找消息"时才用 search_message
-6. **关键**：summarize 只用于"总结群聊整体内容"，不带特定主题。例如：
+1. 如果用户问"历程"、"发展过程"、"从什么时候开始"、"时间线"、"里程碑"、"重大决议"，使用 group_timeline 意图
+2. 如果用户提到了站点代号（如l08、b01、by4等字母+数字组合），优先使用 site_query 意图，并填写 site_prefix
+3. 如果用户问某个纯数字ID对应的站点（如"3040是什么站点"、"3040的前缀"），使用 site_query 意图，并填写 site_id
+4. 如果用户问"谁"、"什么"、"为什么"、"怎么"等问题（但不涉及站点或历程），优先使用 qa 意图
+5. 如果问题涉及项目、需求、功能、Bug、错误、支付、人员等具体主题，优先使用 qa 意图
+6. 只有明确要求"搜索"或"查找消息"时才用 search_message
+7. **关键**：summarize 只用于"总结群聊整体内容"，不带特定主题。例如：
    - "总结今天群里的讨论" -> summarize（没有特定主题）
    - "今天的支付错误总结" -> qa（有特定主题：支付错误）
    - "登录问题汇总" -> qa（有特定主题：登录问题）
@@ -257,11 +263,13 @@ func (c *Client) ParseUserQuery(ctx context.Context, query string) (*ParsedQuery
 - this_month: 本月
 - last_month: 上个月
 - custom: 只有用户明确指定了具体日期范围时才使用
+- all: 全部历史（当用户询问"历程"、"从一开始"、"所有历史"、"发展过程"时使用）
 
 重要时间判断规则：
 1. 如果用户问"给我一个XXX"、"找一个XXX"这类请求，默认使用 today（因为用户通常想要最新的数据）
 2. 如果用户没有提到时间，但问题暗示需要最新数据，使用 today
 3. 只有用户明确说"历史"、"所有"、"全部"时才用 custom
+4. 如果是 group_timeline 意图，默认使用 all（全部历史）
 
 重要：如果用户提到了某个群的名称（如"印尼群"、"虚拟币群"、"支付群"等），请提取到 target_group 字段。
 

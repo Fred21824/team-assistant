@@ -105,7 +105,7 @@ ENDSSH
     log_info "数据库初始化完成"
 }
 
-# 部署到服务器
+# 部署到服务器（包含配置文件）
 deploy() {
     log_info "部署到服务器..."
 
@@ -137,6 +137,31 @@ deploy() {
     ssh_cmd "sudo mv /tmp/config.yaml ${SERVER_DIR}/etc/"
 
     log_info "部署完成"
+}
+
+# 仅部署二进制文件（不覆盖配置）
+deploy_binary_only() {
+    log_info "部署二进制文件（保留服务器配置）..."
+
+    # 创建目录
+    ssh_cmd "sudo mkdir -p ${SERVER_DIR}/etc ${SERVER_DIR}/logs ${SERVER_DIR}/bin && sudo chown -R ubuntu:ubuntu ${SERVER_DIR}"
+
+    # 上传主服务
+    log_info "上传主服务..."
+    scp_cmd build/team-assistant "${SERVER_USER}@${SERVER_HOST}:/tmp/"
+    ssh_cmd "sudo mv /tmp/team-assistant ${SERVER_DIR}/ && sudo chmod +x ${SERVER_DIR}/team-assistant"
+
+    # 上传 syncworker
+    log_info "上传 syncworker..."
+    scp_cmd build/syncworker "${SERVER_USER}@${SERVER_HOST}:/tmp/"
+    ssh_cmd "sudo mv /tmp/syncworker ${SERVER_DIR}/bin/ && sudo chmod +x ${SERVER_DIR}/bin/syncworker"
+
+    # 上传 reindex
+    log_info "上传 reindex..."
+    scp_cmd build/reindex "${SERVER_USER}@${SERVER_HOST}:/tmp/"
+    ssh_cmd "sudo mv /tmp/reindex ${SERVER_DIR}/bin/ && sudo chmod +x ${SERVER_DIR}/bin/reindex"
+
+    log_info "部署完成（配置文件未修改）"
 }
 
 # 创建 systemd 服务
@@ -307,12 +332,12 @@ full_deploy() {
     echo ""
 }
 
-# 仅更新代码（快速部署）
+# 仅更新代码（快速部署，不覆盖配置）
 quick_deploy() {
     check_ssh
     build
     stop
-    deploy
+    deploy_binary_only
     start
 }
 

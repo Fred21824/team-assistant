@@ -260,11 +260,14 @@ func (s *MessageSyncer) getUserName(ctx context.Context, openID string) string {
 
 // ConvertToMessage 转换消息格式（公开方法，供外部调用）
 func (s *MessageSyncer) ConvertToMessage(ctx context.Context, item *lark.MessageItem) *model.ChatMessage {
-	// 解析时间戳
+	// 解析时间戳（飞书返回的是毫秒时间戳）
 	var createTime time.Time
+	var createTimeTs int64
 	if ts, err := strconv.ParseInt(item.CreateTime, 10, 64); err == nil {
+		createTimeTs = ts
 		createTime = time.UnixMilli(ts)
 	} else {
+		createTimeTs = time.Now().UnixMilli()
 		createTime = time.Now()
 	}
 
@@ -294,17 +297,20 @@ func (s *MessageSyncer) ConvertToMessage(ctx context.Context, item *lark.Message
 	}
 
 	return &model.ChatMessage{
-		MessageID:  item.MessageID,
-		ChatID:     item.ChatID,
-		SenderID:   sql.NullString{String: item.Sender.ID, Valid: item.Sender.ID != ""},
-		SenderName: sql.NullString{String: senderName, Valid: senderName != ""},
-		MsgType:    sql.NullString{String: item.MsgType, Valid: true},
-		Content:    sql.NullString{String: content, Valid: content != ""},
-		RawContent: sql.NullString{String: item.Body.Content, Valid: item.Body.Content != ""},
-		Mentions:   mentionsJSON,
-		ReplyToID:  sql.NullString{String: item.ParentID, Valid: item.ParentID != ""},
-		IsAtBot:    0,
-		CreatedAt:  createTime,
+		MessageID:   item.MessageID,
+		ChatID:      item.ChatID,
+		SenderID:    sql.NullString{String: item.Sender.ID, Valid: item.Sender.ID != ""},
+		SenderName:  sql.NullString{String: senderName, Valid: senderName != ""},
+		MsgType:     sql.NullString{String: item.MsgType, Valid: true},
+		Content:     sql.NullString{String: content, Valid: content != ""},
+		RawContent:  sql.NullString{String: item.Body.Content, Valid: item.Body.Content != ""},
+		Mentions:    mentionsJSON,
+		ReplyToID:   sql.NullString{String: item.ParentID, Valid: item.ParentID != ""},
+		ThreadID:    sql.NullString{String: item.ThreadID, Valid: item.ThreadID != ""},
+		RootID:      sql.NullString{String: item.RootID, Valid: item.RootID != ""},
+		IsAtBot:     0,
+		CreatedAt:   createTime,
+		CreatedAtTs: sql.NullInt64{Int64: createTimeTs, Valid: true},
 	}
 }
 

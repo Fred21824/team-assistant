@@ -27,6 +27,9 @@ Thumbs.db
 etc/config.yaml
 etc/config.server.yaml
 
+# Claude settings with command history
+.claude/settings.local.json
+
 # Logs
 *.log
 logs/

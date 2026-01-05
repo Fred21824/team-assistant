@@ -2,16 +2,17 @@ package config
 
 // Config 应用配置
 type Config struct {
-	Server   ServerConfig   `yaml:"Server"`
-	MySQL    MySQLConfig    `yaml:"MySQL"`
-	Redis    RedisConfig    `yaml:"Redis"`
-	Lark     LarkConfig     `yaml:"Lark"`
-	GitHub   GitHubConfig   `yaml:"GitHub"`
-	LLM      LLMConfig      `yaml:"LLM"`
-	Dify     DifyConfig     `yaml:"Dify"`
-	VectorDB VectorDBConfig `yaml:"VectorDB"`
-	Bitable  BitableConfig  `yaml:"Bitable"`
-	AutoSync AutoSyncConfig `yaml:"AutoSync"`
+	Server      ServerConfig      `yaml:"Server"`
+	MySQL       MySQLConfig       `yaml:"MySQL"`
+	Redis       RedisConfig       `yaml:"Redis"`
+	Lark        LarkConfig        `yaml:"Lark"`
+	GitHub      GitHubConfig      `yaml:"GitHub"`
+	LLM         LLMConfig         `yaml:"LLM"`
+	Dify        DifyConfig        `yaml:"Dify"`
+	VectorDB    VectorDBConfig    `yaml:"VectorDB"`
+	Bitable     BitableConfig     `yaml:"Bitable"`
+	AutoSync    AutoSyncConfig    `yaml:"AutoSync"`
+	Permissions PermissionsConfig `yaml:"Permissions"`
 }
 
 // ServerConfig 服务器配置
@@ -102,4 +103,12 @@ type AutoSyncChatConfig struct {
 	Name            string `yaml:"Name"`            // 群名（仅用于日志）
 	Interval        int    `yaml:"Interval"`        // 同步间隔（秒），最小10秒
 	LookbackMinutes int    `yaml:"LookbackMinutes"` // 每次拉取最近多少分钟的消息
+}
+
+// PermissionsConfig 权限控制配置
+type PermissionsConfig struct {
+	// 私聊白名单：只有这些用户可以使用私聊功能（用户名列表，不区分大小写）
+	PrivateChatAllowedUsers []string `yaml:"PrivateChatAllowedUsers"`
+	// 群聊最小成员数：只有成员数 >= 此值的群才能使用机器人
+	GroupMinMembers int `yaml:"GroupMinMembers"`
 }

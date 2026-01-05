@@ -273,6 +273,7 @@ type GetMessagesResponse struct {
 
 type MessageItem struct {
 	MessageID   string `json:"message_id"`
+	ThreadID    string `json:"thread_id"`
 	RootID      string `json:"root_id"`
 	ParentID    string `json:"parent_id"`
 	MsgType     string `json:"msg_type"`
@@ -519,6 +520,45 @@ func (c *Client) GetChatMembers(ctx context.Context, chatID string) (map[string]
 	}
 
 	return members, nil
+}
+
+// GetChatInfo 获取单个群的信息（包括成员数）
+func (c *Client) GetChatInfo(ctx context.Context, chatID string) (*ChatInfo, error) {
+	token, err := c.GetTenantAccessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	url := fmt.Sprintf("%s/open-apis/im/v1/chats/%s", c.domain, chatID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data *ChatInfo `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, err
+	}
+
+	if result.Code != 0 {
+		return nil, fmt.Errorf("get chat info failed: %s", result.Msg)
+	}
+
+	return result.Data, nil
 }
 
 // ======================== Bitable (多维表格) API ========================

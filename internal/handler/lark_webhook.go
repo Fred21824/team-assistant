@@ -147,6 +147,11 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 		content = strings.TrimSpace(content)
 		if content != "" {
 			log.Printf("Received private message: %s", content)
+			// 检查私聊权限
+			if !h.checkPrivateChatPermission(&event) {
+				go h.replyNoPrivateChatPermission(&event)
+				return
+			}
 			go h.handlePrivateCommand(&event, content)
 		}
 		return
@@ -159,6 +164,12 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 	}
 
 	if content == "" {
+		return
+	}
+
+	// 检查群聊成员数权限
+	if !h.checkGroupPermission(&event) {
+		go h.replyNoGroupPermission(&event)
 		return
 	}
 
@@ -229,11 +240,14 @@ func (h *LarkWebhookHandler) storeMessage(event *lark.MessageReceiveEvent, conte
 
 	ctx := context.Background()
 
-	// 解析发送时间
+	// 解析发送时间（飞书返回的是毫秒时间戳）
 	var sendTime time.Time
+	var sendTimeTs int64
 	if ts, err := strconv.ParseInt(event.Message.CreateTime, 10, 64); err == nil {
+		sendTimeTs = ts
 		sendTime = time.UnixMilli(ts)
 	} else {
+		sendTimeTs = time.Now().UnixMilli()
 		sendTime = time.Now()
 	}
 
@@ -257,17 +271,19 @@ func (h *LarkWebhookHandler) storeMessage(event *lark.MessageReceiveEvent, conte
 	senderName := h.getUserName(ctx, event.Message.ChatID, event.Sender.SenderID.OpenID)
 
 	msg := &model.ChatMessage{
-		MessageID:  event.Message.MessageID,
-		ChatID:     event.Message.ChatID,
-		SenderID:   sql.NullString{String: event.Sender.SenderID.OpenID, Valid: true},
-		SenderName: sql.NullString{String: senderName, Valid: senderName != ""},
-		MsgType:    sql.NullString{String: event.Message.MessageType, Valid: true},
-		Content:    sql.NullString{String: content, Valid: true},
-		RawContent: sql.NullString{String: event.Message.Content, Valid: true},
-		Mentions:   mentionsJSON,
-		ReplyToID:  sql.NullString{String: event.Message.ParentID, Valid: event.Message.ParentID != ""},
-		IsAtBot:    isAtBot,
-		CreatedAt:  sendTime,
+		MessageID:   event.Message.MessageID,
+		ChatID:      event.Message.ChatID,
+		SenderID:    sql.NullString{String: event.Sender.SenderID.OpenID, Valid: true},
+		SenderName:  sql.NullString{String: senderName, Valid: senderName != ""},
+		MsgType:     sql.NullString{String: event.Message.MessageType, Valid: true},
+		Content:     sql.NullString{String: content, Valid: true},
+		RawContent:  sql.NullString{String: event.Message.Content, Valid: true},
+		Mentions:    mentionsJSON,
+		ReplyToID:   sql.NullString{String: event.Message.ParentID, Valid: event.Message.ParentID != ""},
+		RootID:      sql.NullString{String: event.Message.RootID, Valid: event.Message.RootID != ""},
+		IsAtBot:     isAtBot,
+		CreatedAt:   sendTime,
+		CreatedAtTs: sql.NullInt64{Int64: sendTimeTs, Valid: true},
 	}
 
 	if err := h.svcCtx.MessageModel.Insert(ctx, msg); err != nil {
@@ -552,6 +568,82 @@ func (h *LarkWebhookHandler) trySyncByName(ctx context.Context, messageID, sende
 	reply := fmt.Sprintf("✅ **同步任务已创建**\n\n任务ID: %d\n群聊: %s\n状态: 等待处理\n\n消息同步将在后台进行，完成后会通知您。", taskID, chatName)
 	h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", reply)
 	return true
+}
+
+// checkPrivateChatPermission 检查用户是否有私聊权限
+func (h *LarkWebhookHandler) checkPrivateChatPermission(event *lark.MessageReceiveEvent) bool {
+	// 如果没有配置白名单，默认允许所有用户
+	allowedUsers := h.svcCtx.Config.Permissions.PrivateChatAllowedUsers
+	if len(allowedUsers) == 0 {
+		return true
+	}
+
+	// 获取用户名
+	ctx := context.Background()
+	userInfo, err := h.svcCtx.LarkClient.GetUserInfo(ctx, event.Sender.SenderID.OpenID)
+	if err != nil {
+		log.Printf("Failed to get user info for permission check: %v", err)
+		return false
+	}
+
+	// 检查用户名是否在白名单中（不区分大小写）
+	userName := strings.ToLower(userInfo.Name)
+	enName := strings.ToLower(userInfo.EnName)
+	for _, allowed := range allowedUsers {
+		allowedLower := strings.ToLower(allowed)
+		if userName == allowedLower || enName == allowedLower {
+			log.Printf("User %s (%s) has private chat permission", userInfo.Name, event.Sender.SenderID.OpenID)
+			return true
+		}
+	}
+
+	log.Printf("User %s (%s) does not have private chat permission", userInfo.Name, event.Sender.SenderID.OpenID)
+	return false
+}
+
+// replyNoPrivateChatPermission 回复无私聊权限
+func (h *LarkWebhookHandler) replyNoPrivateChatPermission(event *lark.MessageReceiveEvent) {
+	ctx := context.Background()
+	reply := "抱歉，您没有私聊机器人的权限。\n\n请在群聊中 @机器人 使用（群成员需 >= 10 人）。"
+	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, event.Message.MessageID, "text", reply); err != nil {
+		log.Printf("Failed to reply no permission: %v", err)
+	}
+}
+
+// checkGroupPermission 检查群聊是否满足成员数要求
+func (h *LarkWebhookHandler) checkGroupPermission(event *lark.MessageReceiveEvent) bool {
+	// 如果没有配置最小成员数，默认允许
+	minMembers := h.svcCtx.Config.Permissions.GroupMinMembers
+	if minMembers <= 0 {
+		return true
+	}
+
+	// 获取群信息
+	ctx := context.Background()
+	chatInfo, err := h.svcCtx.LarkClient.GetChatInfo(ctx, event.Message.ChatID)
+	if err != nil {
+		log.Printf("Failed to get chat info for permission check: %v", err)
+		// 如果获取失败，默认允许（避免因 API 问题阻断服务）
+		return true
+	}
+
+	if chatInfo.MemberCount >= minMembers {
+		log.Printf("Chat %s has %d members, permission granted", event.Message.ChatID, chatInfo.MemberCount)
+		return true
+	}
+
+	log.Printf("Chat %s has only %d members (min: %d), permission denied", event.Message.ChatID, chatInfo.MemberCount, minMembers)
+	return false
+}
+
+// replyNoGroupPermission 回复群成员数不足
+func (h *LarkWebhookHandler) replyNoGroupPermission(event *lark.MessageReceiveEvent) {
+	ctx := context.Background()
+	minMembers := h.svcCtx.Config.Permissions.GroupMinMembers
+	reply := fmt.Sprintf("抱歉，机器人仅在成员数 >= %d 人的群聊中提供服务。", minMembers)
+	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, event.Message.MessageID, "text", reply); err != nil {
+		log.Printf("Failed to reply no permission: %v", err)
+	}
 }
 
 // showSyncStatus 显示同步状态

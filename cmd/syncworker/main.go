@@ -368,6 +368,8 @@ func (s *AutoSyncScheduler) syncChatIncremental(cfg config.AutoSyncChatConfig, c
 
 	syncer := collector.NewMessageSyncer(s.svcCtx)
 
+	log.Printf("AutoSync [%s]: fetching messages from %s to %s", chatName, startTime.Format("15:04:05"), endTime.Format("15:04:05"))
+
 	for page := 0; page < maxPages; page++ {
 		// 拉取消息
 		resp, err := s.svcCtx.LarkClient.GetChatHistory(ctx, cfg.ChatID, startTimeStr, endTimeStr, 50, pageToken)
@@ -375,6 +377,8 @@ func (s *AutoSyncScheduler) syncChatIncremental(cfg config.AutoSyncChatConfig, c
 			log.Printf("AutoSync [%s]: failed to get history: %v", chatName, err)
 			return
 		}
+
+		log.Printf("AutoSync [%s]: page %d, got %d items, has_more=%v", chatName, page, len(resp.Data.Items), resp.Data.HasMore)
 
 		if len(resp.Data.Items) == 0 {
 			break

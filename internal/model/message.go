@@ -8,20 +8,23 @@ import (
 )
 
 type ChatMessage struct {
-	ID          int64          `db:"id"`
-	MessageID   string         `db:"message_id"`
-	ChatID      string         `db:"chat_id"`
-	SenderID    sql.NullString `db:"sender_id"`
-	SenderName  sql.NullString `db:"sender_name"`
-	MemberID    sql.NullInt64  `db:"member_id"`
-	MsgType     sql.NullString `db:"msg_type"`
-	Content     sql.NullString `db:"content"`
-	RawContent  sql.NullString `db:"raw_content"`
-	Mentions    json.RawMessage`db:"mentions"`
-	ReplyToID   sql.NullString `db:"reply_to_id"`
-	IsAtBot     int            `db:"is_at_bot"`
-	CreatedAt   time.Time      `db:"created_at"`
-	IndexedAt   time.Time      `db:"indexed_at"`
+	ID          int64           `db:"id"`
+	MessageID   string          `db:"message_id"`
+	ChatID      string          `db:"chat_id"`
+	SenderID    sql.NullString  `db:"sender_id"`
+	SenderName  sql.NullString  `db:"sender_name"`
+	MemberID    sql.NullInt64   `db:"member_id"`
+	MsgType     sql.NullString  `db:"msg_type"`
+	Content     sql.NullString  `db:"content"`
+	RawContent  sql.NullString  `db:"raw_content"`
+	Mentions    json.RawMessage `db:"mentions"`
+	ReplyToID   sql.NullString  `db:"reply_to_id"`
+	ThreadID    sql.NullString  `db:"thread_id"`
+	RootID      sql.NullString  `db:"root_id"`
+	IsAtBot     int             `db:"is_at_bot"`
+	CreatedAt   time.Time       `db:"created_at"`
+	CreatedAtTs sql.NullInt64   `db:"created_at_ts"` // 毫秒时间戳，用于准确排序
+	IndexedAt   time.Time       `db:"indexed_at"`
 }
 
 type ChatGroup struct {
@@ -46,21 +49,24 @@ func NewChatMessageModel(db *sql.DB) *ChatMessageModel {
 
 func (m *ChatMessageModel) Insert(ctx context.Context, msg *ChatMessage) error {
 	query := `INSERT INTO chat_messages (message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              ON DUPLICATE KEY UPDATE content = VALUES(content), sender_name = COALESCE(VALUES(sender_name), sender_name)`
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON DUPLICATE KEY UPDATE content = VALUES(content), sender_name = COALESCE(VALUES(sender_name), sender_name),
+              thread_id = COALESCE(VALUES(thread_id), thread_id), root_id = COALESCE(VALUES(root_id), root_id),
+              created_at_ts = COALESCE(VALUES(created_at_ts), created_at_ts)`
 	_, err := m.db.ExecContext(ctx, query, msg.MessageID, msg.ChatID, msg.SenderID, msg.SenderName,
-		msg.MemberID, msg.MsgType, msg.Content, msg.RawContent, msg.Mentions, msg.ReplyToID, msg.IsAtBot, msg.CreatedAt)
+		msg.MemberID, msg.MsgType, msg.Content, msg.RawContent, msg.Mentions, msg.ReplyToID,
+		msg.ThreadID, msg.RootID, msg.IsAtBot, msg.CreatedAt, msg.CreatedAtTs)
 	return err
 }
 
 // GetRecentMessages 获取群最近的消息
 func (m *ChatMessageModel) GetRecentMessages(ctx context.Context, chatID string, limit int) ([]*ChatMessage, error) {
 	query := `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
               FROM chat_messages
               WHERE chat_id = ?
-              ORDER BY created_at DESC LIMIT ?`
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) DESC LIMIT ?`
 	rows, err := m.db.QueryContext(ctx, query, chatID, limit)
 	if err != nil {
 		return nil, err
@@ -72,7 +78,7 @@ func (m *ChatMessageModel) GetRecentMessages(ctx context.Context, chatID string,
 		var msg ChatMessage
 		err := rows.Scan(&msg.ID, &msg.MessageID, &msg.ChatID, &msg.SenderID, &msg.SenderName,
 			&msg.MemberID, &msg.MsgType, &msg.Content, &msg.RawContent, &msg.Mentions,
-			&msg.ReplyToID, &msg.IsAtBot, &msg.CreatedAt, &msg.IndexedAt)
+			&msg.ReplyToID, &msg.ThreadID, &msg.RootID, &msg.IsAtBot, &msg.CreatedAt, &msg.CreatedAtTs, &msg.IndexedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -87,20 +93,24 @@ func (m *ChatMessageModel) GetMessagesByDateRange(ctx context.Context, chatID st
 	var rows *sql.Rows
 	var err error
 
+	// 使用毫秒时间戳进行范围查询和排序
+	startTs := start.UnixMilli()
+	endTs := end.UnixMilli()
+
 	if chatID != "" {
 		query = `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
               FROM chat_messages
-              WHERE chat_id = ? AND created_at BETWEEN ? AND ?
-              ORDER BY created_at DESC LIMIT ?`
-		rows, err = m.db.QueryContext(ctx, query, chatID, start, end, limit)
+              WHERE chat_id = ? AND COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) BETWEEN ? AND ?
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) DESC LIMIT ?`
+		rows, err = m.db.QueryContext(ctx, query, chatID, startTs, endTs, limit)
 	} else {
 		query = `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
               FROM chat_messages
-              WHERE created_at BETWEEN ? AND ?
-              ORDER BY created_at DESC LIMIT ?`
-		rows, err = m.db.QueryContext(ctx, query, start, end, limit)
+              WHERE COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) BETWEEN ? AND ?
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) DESC LIMIT ?`
+		rows, err = m.db.QueryContext(ctx, query, startTs, endTs, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -112,7 +122,7 @@ func (m *ChatMessageModel) GetMessagesByDateRange(ctx context.Context, chatID st
 		var msg ChatMessage
 		err := rows.Scan(&msg.ID, &msg.MessageID, &msg.ChatID, &msg.SenderID, &msg.SenderName,
 			&msg.MemberID, &msg.MsgType, &msg.Content, &msg.RawContent, &msg.Mentions,
-			&msg.ReplyToID, &msg.IsAtBot, &msg.CreatedAt, &msg.IndexedAt)
+			&msg.ReplyToID, &msg.ThreadID, &msg.RootID, &msg.IsAtBot, &msg.CreatedAt, &msg.CreatedAtTs, &msg.IndexedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -134,17 +144,17 @@ func (m *ChatMessageModel) searchByLike(ctx context.Context, chatID, keyword str
 
 	if chatID != "" {
 		query = `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
               FROM chat_messages
               WHERE chat_id = ? AND content LIKE ?
-              ORDER BY created_at DESC LIMIT ?`
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) DESC LIMIT ?`
 		rows, err = m.db.QueryContext(ctx, query, chatID, "%"+keyword+"%", limit)
 	} else {
 		query = `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
               FROM chat_messages
               WHERE content LIKE ?
-              ORDER BY created_at DESC LIMIT ?`
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) DESC LIMIT ?`
 		rows, err = m.db.QueryContext(ctx, query, "%"+keyword+"%", limit)
 	}
 	if err != nil {
@@ -157,7 +167,7 @@ func (m *ChatMessageModel) searchByLike(ctx context.Context, chatID, keyword str
 		var msg ChatMessage
 		err := rows.Scan(&msg.ID, &msg.MessageID, &msg.ChatID, &msg.SenderID, &msg.SenderName,
 			&msg.MemberID, &msg.MsgType, &msg.Content, &msg.RawContent, &msg.Mentions,
-			&msg.ReplyToID, &msg.IsAtBot, &msg.CreatedAt, &msg.IndexedAt)
+			&msg.ReplyToID, &msg.ThreadID, &msg.RootID, &msg.IsAtBot, &msg.CreatedAt, &msg.CreatedAtTs, &msg.IndexedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -174,17 +184,17 @@ func (m *ChatMessageModel) SearchBySender(ctx context.Context, chatID, senderNam
 
 	if chatID != "" {
 		query = `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
               FROM chat_messages
               WHERE chat_id = ? AND sender_name LIKE ? AND content LIKE ?
-              ORDER BY created_at DESC LIMIT ?`
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) DESC LIMIT ?`
 		rows, err = m.db.QueryContext(ctx, query, chatID, "%"+senderName+"%", "%"+keyword+"%", limit)
 	} else {
 		query = `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
               FROM chat_messages
               WHERE sender_name LIKE ? AND content LIKE ?
-              ORDER BY created_at DESC LIMIT ?`
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) DESC LIMIT ?`
 		rows, err = m.db.QueryContext(ctx, query, "%"+senderName+"%", "%"+keyword+"%", limit)
 	}
 	if err != nil {
@@ -197,7 +207,7 @@ func (m *ChatMessageModel) SearchBySender(ctx context.Context, chatID, senderNam
 		var msg ChatMessage
 		err := rows.Scan(&msg.ID, &msg.MessageID, &msg.ChatID, &msg.SenderID, &msg.SenderName,
 			&msg.MemberID, &msg.MsgType, &msg.Content, &msg.RawContent, &msg.Mentions,
-			&msg.ReplyToID, &msg.IsAtBot, &msg.CreatedAt, &msg.IndexedAt)
+			&msg.ReplyToID, &msg.ThreadID, &msg.RootID, &msg.IsAtBot, &msg.CreatedAt, &msg.CreatedAtTs, &msg.IndexedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -209,10 +219,10 @@ func (m *ChatMessageModel) SearchBySender(ctx context.Context, chatID, senderNam
 // GetAtBotMessages 获取@机器人的消息
 func (m *ChatMessageModel) GetAtBotMessages(ctx context.Context, limit int) ([]*ChatMessage, error) {
 	query := `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
               FROM chat_messages
               WHERE is_at_bot = 1
-              ORDER BY created_at DESC LIMIT ?`
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) DESC LIMIT ?`
 	rows, err := m.db.QueryContext(ctx, query, limit)
 	if err != nil {
 		return nil, err
@@ -224,7 +234,7 @@ func (m *ChatMessageModel) GetAtBotMessages(ctx context.Context, limit int) ([]*
 		var msg ChatMessage
 		err := rows.Scan(&msg.ID, &msg.MessageID, &msg.ChatID, &msg.SenderID, &msg.SenderName,
 			&msg.MemberID, &msg.MsgType, &msg.Content, &msg.RawContent, &msg.Mentions,
-			&msg.ReplyToID, &msg.IsAtBot, &msg.CreatedAt, &msg.IndexedAt)
+			&msg.ReplyToID, &msg.ThreadID, &msg.RootID, &msg.IsAtBot, &msg.CreatedAt, &msg.CreatedAtTs, &msg.IndexedAt)
 		if err != nil {
 			return nil, err
 		}
@@ -462,15 +472,15 @@ func (m *MessageSyncTaskModel) GetRecentTasks(ctx context.Context, limit int) ([
 // GetGroupFirstMessage 获取群的第一条消息（用于确定群的起始时间）
 func (m *ChatMessageModel) GetGroupFirstMessage(ctx context.Context, chatID string) (*ChatMessage, error) {
 	query := `SELECT id, message_id, chat_id, sender_id, sender_name, member_id, msg_type,
-              content, raw_content, mentions, reply_to_id, is_at_bot, created_at, indexed_at
+              content, raw_content, mentions, reply_to_id, thread_id, root_id, is_at_bot, created_at, created_at_ts, indexed_at
               FROM chat_messages
               WHERE chat_id = ?
-              ORDER BY created_at ASC LIMIT 1`
+              ORDER BY COALESCE(created_at_ts, UNIX_TIMESTAMP(created_at)*1000) ASC LIMIT 1`
 	var msg ChatMessage
 	err := m.db.QueryRowContext(ctx, query, chatID).Scan(
 		&msg.ID, &msg.MessageID, &msg.ChatID, &msg.SenderID, &msg.SenderName,
 		&msg.MemberID, &msg.MsgType, &msg.Content, &msg.RawContent, &msg.Mentions,
-		&msg.ReplyToID, &msg.IsAtBot, &msg.CreatedAt, &msg.IndexedAt)
+		&msg.ReplyToID, &msg.ThreadID, &msg.RootID, &msg.IsAtBot, &msg.CreatedAt, &msg.CreatedAtTs, &msg.IndexedAt)
 	if err != nil {
 		return nil, err
 	}

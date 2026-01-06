@@ -815,12 +815,13 @@ func (h *LarkWebhookHandler) checkPrivateChatPermission(event *lark.MessageRecei
 		return false
 	}
 
-	// 检查用户名是否在白名单中（不区分大小写）
+	// 检查用户名或 OpenID 是否在白名单中（不区分大小写）
 	userName := strings.ToLower(userInfo.Name)
 	enName := strings.ToLower(userInfo.EnName)
+	openID := event.Sender.SenderID.OpenID
 	for _, allowed := range allowedUsers {
 		allowedLower := strings.ToLower(allowed)
-		if userName == allowedLower || enName == allowedLower {
+		if userName == allowedLower || enName == allowedLower || openID == allowed {
 			log.Printf("User %s (%s) has private chat permission", userInfo.Name, event.Sender.SenderID.OpenID)
 			return true
 		}

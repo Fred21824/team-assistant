@@ -69,6 +69,16 @@ type LLMConfig struct {
 	ProxyPort     int    `yaml:"ProxyPort"`     // 代理端口，如 9662
 	ProxyUser     string `yaml:"ProxyUser"`     // 代理用户名
 	ProxyPassword string `yaml:"ProxyPassword"` // 代理密码
+	// 备选模型配置（按优先级排列，主模型失败时自动切换）
+	FallbackModels []FallbackModelConfig `yaml:"FallbackModels"`
+}
+
+// FallbackModelConfig 备选模型配置
+type FallbackModelConfig struct {
+	Provider string `yaml:"Provider"` // groq, openai, anthropic
+	APIKey   string `yaml:"APIKey"`   // 为空则使用主 APIKey
+	Endpoint string `yaml:"Endpoint"` // API 端点
+	Model    string `yaml:"Model"`    // 模型名称
 }
 
 // DifyConfig Dify 配置

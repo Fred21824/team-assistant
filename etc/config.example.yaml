@@ -43,35 +43,37 @@ GitHub:
 
 # LLM 配置
 LLM:
-  # 使用 Groq（免费快速）
-  Provider: "groq"
-  APIKey: "gsk_your_groq_api_key"
-  Endpoint: "https://api.groq.com/openai/v1/chat/completions"
-  Model: "llama-3.3-70b-versatile"
-
-  # 备用方案 1: NVIDIA NIM + MiniMax-M2.1（推荐，推理能力强）
-  # Provider: "openai"
-  # APIKey: "nvapi-your-nvidia-api-key"
-  # Endpoint: "https://integrate.api.nvidia.com/v1/chat/completions"
-  # Model: "minimaxai/minimax-m2.1"
-
-  # 备用方案 2: OpenAI
-  # Provider: "openai"
-  # Endpoint: "https://api.openai.com/v1/chat/completions"
-  # APIKey: "sk-your-openai-key"
-  # Model: "gpt-4o-mini"
-
-  # 备用方案 3: Claude (需要代理)
-  # Provider: "anthropic"
-  # APIKey: "sk-ant-your-key"
-  # Endpoint: "https://api.anthropic.com/v1/messages"
-  # Model: "claude-sonnet-4-20250514"
+  # 主模型（NVIDIA NIM + Llama 3.3）
+  Provider: "openai"
+  APIKey: "nvapi-your-nvidia-api-key"
+  Endpoint: "https://integrate.api.nvidia.com/v1/chat/completions"
+  Model: "meta/llama-3.3-70b-instruct"
 
   # 视觉模型配置（可选，用于处理图片消息）
-  # 当消息包含图片时，会自动切换到视觉模型
-  # VisionModel: "meta/llama-3.2-90b-vision-instruct"
-  # VisionEndpoint: "https://integrate.api.nvidia.com/v1/chat/completions"  # 可选，默认使用主 Endpoint
+  VisionModel: "meta/llama-3.2-90b-vision-instruct"
+  # VisionEndpoint: ""  # 可选，默认使用主 Endpoint
   # VisionAPIKey: ""  # 可选，默认使用主 APIKey
+
+  # 备选模型（智能切换：主模型失败时自动尝试备选模型）
+  # 按优先级排列，系统会依次尝试直到成功
+  FallbackModels:
+    # 备选 1: DeepSeek R1（NVIDIA NIM 托管）
+    - Provider: "openai"
+      Endpoint: "https://integrate.api.nvidia.com/v1/chat/completions"
+      Model: "deepseek-ai/deepseek-r1"
+      # APIKey: ""  # 为空则使用主 APIKey
+
+    # 备选 2: Groq（免费快速，作为最后保底）
+    - Provider: "groq"
+      Endpoint: "https://api.groq.com/openai/v1/chat/completions"
+      Model: "llama-3.3-70b-versatile"
+      APIKey: "gsk_your_groq_api_key"
+
+  # 其他可用主模型：
+  # - NVIDIA NIM: minimaxai/minimax-m2.1, deepseek-ai/deepseek-v3.2
+  # - Groq: llama-3.3-70b-versatile（免费）
+  # - OpenAI: gpt-4o-mini
+  # - Claude (需代理): claude-sonnet-4-20250514
 
 # Dify 配置（可选，启用后使用 Dify 处理对话）
 Dify:

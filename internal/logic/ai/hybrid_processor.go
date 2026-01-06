@@ -875,6 +875,14 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 	keywords := hp.extractSearchKeywords(query, parsed.Keywords)
 	log.Printf("QA search keywords: %v", keywords)
 
+	// 根据查询类型决定搜索数量
+	// 统计类查询（如"最多的问题"）需要更多历史数据
+	searchLimit := 100
+	if hp.isStatisticalQuery(query) {
+		searchLimit = 500
+		log.Printf("Statistical query detected, using larger search limit: %d", searchLimit)
+	}
+
 	// 使用改进的搜索策略：优先匹配多关键词，按相关度排序
 	type scoredMessage struct {
 		content   string
@@ -886,7 +894,7 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 
 	// 1. 使用组合关键词搜索（优先返回同时匹配多个关键词的消息）
 	if len(keywords) >= 1 {
-		messages, matchCounts, err := hp.svcCtx.MessageModel.SearchByKeywordCombinations(ctx, chatID, keywords, 100)
+		messages, matchCounts, err := hp.svcCtx.MessageModel.SearchByKeywordCombinations(ctx, chatID, keywords, searchLimit)
 		if err == nil {
 			for _, msg := range messages {
 				if msg.Content.Valid {
@@ -937,7 +945,8 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 			hybridOpts.EndTime = &endTime
 		}
 
-		results, err := hp.svcCtx.Services.RAG.HybridSearch(ctx, searchQuery, keywords, 50, hybridOpts)
+		hybridLimit := searchLimit / 2 // 混合搜索用一半的限制
+		results, err := hp.svcCtx.Services.RAG.HybridSearch(ctx, searchQuery, keywords, hybridLimit, hybridOpts)
 		if err != nil {
 			log.Printf("Hybrid search failed: %v", err)
 		} else {
@@ -977,10 +986,14 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 		return sortedMessages[i].timestamp.After(sortedMessages[j].timestamp)
 	})
 
-	// 转换为列表（最多取前 80 条，保证高相关度消息在前）
+	// 转换为列表（根据查询类型调整数量，统计类需要更多上下文）
+	outputLimit := 80
+	if hp.isStatisticalQuery(query) {
+		outputLimit = 200 // 统计类查询需要更多消息来做准确分析
+	}
 	var relevantMessages []string
 	for i, sm := range sortedMessages {
-		if i >= 80 {
+		if i >= outputLimit {
 			break
 		}
 		relevantMessages = append(relevantMessages, sm.formatted)
@@ -994,8 +1007,13 @@ func (hp *HybridProcessor) handleQA(ctx context.Context, parsed *llm.ParsedQuery
 
 	// 使用 LLM 根据找到的消息回答问题
 	context := strings.Join(relevantMessages, "\n")
-	if len(context) > 8000 {
-		context = context[:8000] + "...(内容已截断)"
+	// 统计类查询允许更大的上下文
+	maxContextLen := 8000
+	if hp.isStatisticalQuery(query) {
+		maxContextLen = 15000
+	}
+	if len(context) > maxContextLen {
+		context = context[:maxContextLen] + "...(内容已截断)"
 	}
 
 	answer, err := hp.answerWithContext(ctx, parsed.RawQuery, context)
@@ -1260,6 +1278,26 @@ func (hp *HybridProcessor) isPersonActivityQuery(query string) bool {
 	activityPatterns := []string{"做了什么", "干了什么", "做什么", "在做什么", "负责什么", "做了啥"}
 	for _, p := range activityPatterns {
 		if strings.Contains(query, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// isStatisticalQuery 判断是否是需要统计分析的查询（需要更多历史数据）
+func (hp *HybridProcessor) isStatisticalQuery(query string) bool {
+	// 统计类关键词：需要汇总、排名、频率分析的查询
+	statisticalPatterns := []string{
+		"最多", "最常", "最频繁", "最高", "最大",
+		"统计", "汇总", "排名", "排行", "top",
+		"多少次", "多少个", "有多少",
+		"主要", "常见", "频繁", "经常",
+		"有史以来", "历史上", "一直以来",
+		"所有", "全部", "总共",
+	}
+	queryLower := strings.ToLower(query)
+	for _, p := range statisticalPatterns {
+		if strings.Contains(queryLower, p) {
 			return true
 		}
 	}

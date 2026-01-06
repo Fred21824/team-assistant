@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -80,6 +81,21 @@ type ChatTurn struct {
 	Response string // 助手回复
 }
 
+// ModelConfig 模型配置
+type ModelConfig struct {
+	Provider string
+	APIKey   string
+	Endpoint string
+	Model    string
+}
+
+// ModelHealth 模型健康状态
+type ModelHealth struct {
+	FailCount    int       // 连续失败次数
+	LastFailTime time.Time // 最后失败时间
+	IsHealthy    bool      // 是否健康
+}
+
 // Client LLM客户端
 type Client struct {
 	apiKey       string
@@ -88,6 +104,12 @@ type Client struct {
 	provider     string // "openai", "anthropic", "groq"
 	client       *http.Client
 	visionConfig *VisionConfig // 视觉模型配置（可选）
+
+	// 智能切换相关
+	fallbackModels []ModelConfig          // 备选模型列表
+	modelHealth    map[string]*ModelHealth // 模型健康状态 (key: endpoint+model)
+	healthMu       sync.RWMutex           // 保护 modelHealth 的锁
+	currentModel   int                    // 当前使用的模型索引 (-1 表示主模型)
 }
 
 // NewClient 创建LLM客户端
@@ -142,12 +164,95 @@ func NewClientWithProxy(apiKey, endpoint, model string, proxyConfig *ProxyConfig
 	}
 
 	return &Client{
-		apiKey:   apiKey,
-		endpoint: endpoint,
-		model:    model,
-		provider: provider,
-		client:   httpClient,
+		apiKey:         apiKey,
+		endpoint:       endpoint,
+		model:          model,
+		provider:       provider,
+		client:         httpClient,
+		fallbackModels: nil,
+		modelHealth:    make(map[string]*ModelHealth),
+		currentModel:   -1, // -1 表示使用主模型
 	}
+}
+
+// SetFallbackModels 设置备选模型列表
+func (c *Client) SetFallbackModels(models []ModelConfig) {
+	c.fallbackModels = models
+	log.Printf("[LLM] Configured %d fallback models", len(models))
+	for i, m := range models {
+		log.Printf("[LLM]   Fallback %d: %s (%s)", i+1, m.Model, m.Endpoint)
+	}
+}
+
+// getModelKey 获取模型的唯一标识
+func getModelKey(endpoint, model string) string {
+	return endpoint + ":" + model
+}
+
+// markModelFailed 标记模型失败
+func (c *Client) markModelFailed(endpoint, model string) {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	key := getModelKey(endpoint, model)
+	health, exists := c.modelHealth[key]
+	if !exists {
+		health = &ModelHealth{IsHealthy: true}
+		c.modelHealth[key] = health
+	}
+
+	health.FailCount++
+	health.LastFailTime = time.Now()
+
+	// 连续失败 3 次标记为不健康
+	if health.FailCount >= 3 {
+		health.IsHealthy = false
+		log.Printf("[LLM] Model %s marked as unhealthy after %d failures", model, health.FailCount)
+	}
+}
+
+// markModelSuccess 标记模型成功
+func (c *Client) markModelSuccess(endpoint, model string) {
+	c.healthMu.Lock()
+	defer c.healthMu.Unlock()
+
+	key := getModelKey(endpoint, model)
+	health, exists := c.modelHealth[key]
+	if !exists {
+		health = &ModelHealth{IsHealthy: true}
+		c.modelHealth[key] = health
+	}
+
+	// 成功后重置失败计数
+	health.FailCount = 0
+	health.IsHealthy = true
+}
+
+// isModelHealthy 检查模型是否健康
+func (c *Client) isModelHealthy(endpoint, model string) bool {
+	c.healthMu.RLock()
+	defer c.healthMu.RUnlock()
+
+	key := getModelKey(endpoint, model)
+	health, exists := c.modelHealth[key]
+	if !exists {
+		return true // 默认健康
+	}
+
+	// 如果标记为不健康，但已经过了 5 分钟，尝试恢复
+	if !health.IsHealthy && time.Since(health.LastFailTime) > 5*time.Minute {
+		return true // 允许重试
+	}
+
+	return health.IsHealthy
+}
+
+// GetCurrentModelName 获取当前使用的模型名称
+func (c *Client) GetCurrentModelName() string {
+	if c.currentModel < 0 || c.currentModel >= len(c.fallbackModels) {
+		return c.model
+	}
+	return c.fallbackModels[c.currentModel].Model
 }
 
 // SetVisionConfig 设置视觉模型配置
@@ -690,33 +795,78 @@ func (c *Client) chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 }
 
 // chatOpenAI 使用 OpenAI 兼容格式 (OpenAI, Groq, NVIDIA NIM 等)
-// 包含自动重试机制：超时或网络错误时最多重试 2 次
+// 包含智能切换机制：主模型失败时自动切换到备选模型
 func (c *Client) chatOpenAI(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
-	const maxRetries = 3
+	// 构建模型列表：主模型 + 备选模型
+	type modelInfo struct {
+		provider string
+		apiKey   string
+		endpoint string
+		model    string
+	}
+
+	models := []modelInfo{
+		{c.provider, c.apiKey, c.endpoint, c.model}, // 主模型
+	}
+	for _, fb := range c.fallbackModels {
+		apiKey := fb.APIKey
+		if apiKey == "" {
+			apiKey = c.apiKey // 默认使用主 APIKey
+		}
+		models = append(models, modelInfo{fb.Provider, apiKey, fb.Endpoint, fb.Model})
+	}
+
 	var lastErr error
 
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		resp, err := c.doOpenAIRequest(ctx, req)
-		if err == nil {
-			return resp, nil
+	// 尝试每个模型
+	for idx, m := range models {
+		// 跳过不健康的模型（但如果是最后一个，仍然尝试）
+		if !c.isModelHealthy(m.endpoint, m.model) && idx < len(models)-1 {
+			log.Printf("[LLM] Skipping unhealthy model: %s", m.model)
+			continue
 		}
 
-		lastErr = err
+		// 设置请求的模型
+		reqCopy := req
+		reqCopy.Model = m.model
 
-		// 判断是否是可重试的错误（超时、网络错误）
-		if !isRetryableError(err) {
-			return nil, err
-		}
+		// 对每个模型尝试最多 2 次
+		for attempt := 1; attempt <= 2; attempt++ {
+			log.Printf("[LLM] Trying model %s (attempt %d/2)", m.model, attempt)
 
-		// 最后一次尝试不需要等待
-		if attempt < maxRetries {
-			log.Printf("[LLM] Request failed (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
-			// 指数退避：1秒、2秒
-			time.Sleep(time.Duration(attempt) * time.Second)
+			resp, err := c.doOpenAIRequestWithConfig(ctx, reqCopy, m.apiKey, m.endpoint)
+			if err == nil {
+				// 成功
+				c.markModelSuccess(m.endpoint, m.model)
+				if idx > 0 {
+					log.Printf("[LLM] Successfully used fallback model: %s", m.model)
+				}
+				c.currentModel = idx - 1 // 更新当前模型索引
+				return resp, nil
+			}
+
+			lastErr = err
+
+			// 如果不是可重试错误，直接标记失败并尝试下一个模型
+			if !isRetryableError(err) {
+				log.Printf("[LLM] Model %s failed with non-retryable error: %v", m.model, err)
+				c.markModelFailed(m.endpoint, m.model)
+				break
+			}
+
+			// 第一次失败后短暂等待再重试
+			if attempt == 1 {
+				log.Printf("[LLM] Model %s failed (attempt 1): %v, retrying...", m.model, err)
+				time.Sleep(1 * time.Second)
+			} else {
+				// 第二次也失败，标记模型失败，尝试下一个
+				log.Printf("[LLM] Model %s failed after 2 attempts: %v", m.model, err)
+				c.markModelFailed(m.endpoint, m.model)
+			}
 		}
 	}
 
-	return nil, fmt.Errorf("LLM request failed after %d attempts: %w", maxRetries, lastErr)
+	return nil, fmt.Errorf("all LLM models failed, last error: %w", lastErr)
 }
 
 // isRetryableError 判断是否是可重试的错误
@@ -744,7 +894,7 @@ func isRetryableError(err error) bool {
 	return false
 }
 
-// doOpenAIRequest 执行单次 OpenAI API 请求
+// doOpenAIRequest 执行单次 OpenAI API 请求（使用默认配置）
 func (c *Client) doOpenAIRequest(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	// 检测请求中是否包含图片，如果有则切换到视觉模型
 	endpoint := c.endpoint
@@ -760,6 +910,11 @@ func (c *Client) doOpenAIRequest(ctx context.Context, req ChatRequest) (*ChatRes
 		}
 	}
 
+	return c.doOpenAIRequestWithConfig(ctx, req, apiKey, endpoint)
+}
+
+// doOpenAIRequestWithConfig 执行单次 OpenAI API 请求（指定配置）
+func (c *Client) doOpenAIRequestWithConfig(ctx context.Context, req ChatRequest, apiKey, endpoint string) (*ChatResponse, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, err

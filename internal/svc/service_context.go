@@ -116,6 +116,19 @@ func NewServiceContext(c config.Config) (*ServiceContext, error) {
 		if c.LLM.VisionModel != "" {
 			llmClient.SetVisionConfig(c.LLM.VisionModel, c.LLM.VisionEndpoint, c.LLM.VisionAPIKey)
 		}
+		// 设置备选模型（智能切换）
+		if len(c.LLM.FallbackModels) > 0 {
+			var fallbacks []llm.ModelConfig
+			for _, fb := range c.LLM.FallbackModels {
+				fallbacks = append(fallbacks, llm.ModelConfig{
+					Provider: fb.Provider,
+					APIKey:   fb.APIKey,
+					Endpoint: fb.Endpoint,
+					Model:    fb.Model,
+				})
+			}
+			llmClient.SetFallbackModels(fallbacks)
+		}
 	}
 
 	var difyClient *dify.Client

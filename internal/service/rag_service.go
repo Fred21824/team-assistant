@@ -28,6 +28,11 @@ type RAGService struct {
 	vectorDB        *vectordb.QdrantClient
 	collectionName  string
 	enabled         bool
+	bm25Scorer      *BM25Scorer  // BM25 评分器
+	chunker         *TextChunker // 文本分块器
+	enableChunking  bool         // 是否启用分块
+	reranker        *Reranker    // 重排序器
+	enableRerank    bool         // 是否启用重排序
 }
 
 // MessageVector 消息向量数据
@@ -56,6 +61,11 @@ func NewRAGService(qdrantEndpoint, ollamaEndpoint, embeddingModel, collectionNam
 		vectorDB:        vectorClient,
 		collectionName:  collectionName,
 		enabled:         true,
+		bm25Scorer:      NewBM25Scorer(1.5, 0.75), // 使用默认 BM25 参数
+		chunker:         NewDefaultChunker(),      // 默认分块器
+		enableChunking:  true,                     // 默认启用分块
+		reranker:        NewDefaultReranker(),     // 默认重排序器
+		enableRerank:    true,                     // 默认启用重排序
 	}
 
 	// 初始化集合
@@ -99,6 +109,17 @@ func (s *RAGService) IndexMessage(ctx context.Context, msg MessageVector) error 
 		return nil
 	}
 
+	// 如果启用分块且文本需要分块
+	if s.enableChunking && s.chunker != nil && s.chunker.ShouldChunk(msg.Content) {
+		return s.indexMessageWithChunks(ctx, msg)
+	}
+
+	// 不分块，直接索引整条消息
+	return s.indexMessageDirect(ctx, msg)
+}
+
+// indexMessageDirect 直接索引整条消息（不分块）
+func (s *RAGService) indexMessageDirect(ctx context.Context, msg MessageVector) error {
 	// 生成 embedding
 	vector, err := s.embeddingClient.GetEmbedding(ctx, msg.Content)
 	if err != nil {
@@ -117,11 +138,65 @@ func (s *RAGService) IndexMessage(ctx context.Context, msg MessageVector) error 
 			"sender_name": msg.SenderName,
 			"content":     msg.Content,
 			"created_at":  msg.CreatedAt.Format(time.RFC3339),
+			"is_chunk":    false,
 		},
 	}
 
 	if err := s.vectorDB.Upsert(ctx, s.collectionName, []vectordb.Point{point}); err != nil {
 		return fmt.Errorf("upsert point: %w", err)
+	}
+
+	return nil
+}
+
+// indexMessageWithChunks 将消息分块后索引
+func (s *RAGService) indexMessageWithChunks(ctx context.Context, msg MessageVector) error {
+	chunks := s.chunker.ChunkMessage(msg)
+
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	// 如果只有一个分块，直接索引
+	if len(chunks) == 1 {
+		return s.indexMessageDirect(ctx, msg)
+	}
+
+	log.Printf("[RAG] Chunking message %s into %d chunks", msg.MessageID, len(chunks))
+
+	points := make([]vectordb.Point, 0, len(chunks))
+	for _, chunk := range chunks {
+		vector, err := s.embeddingClient.GetEmbedding(ctx, chunk.Content)
+		if err != nil {
+			log.Printf("[RAG] Failed to get embedding for chunk %s: %v", chunk.ID, err)
+			continue
+		}
+
+		points = append(points, vectordb.Point{
+			ID:     messageIDToUUID(chunk.ID),
+			Vector: vector,
+			Payload: map[string]interface{}{
+				"message_id":   msg.MessageID, // 原消息ID
+				"chunk_id":     chunk.ID,      // 分块ID
+				"chunk_index":  chunk.ChunkIndex,
+				"total_chunks": chunk.TotalChunks,
+				"chat_id":      msg.ChatID,
+				"chat_name":    msg.ChatName,
+				"sender_id":    msg.SenderID,
+				"sender_name":  msg.SenderName,
+				"content":      chunk.Content, // 分块内容
+				"created_at":   msg.CreatedAt.Format(time.RFC3339),
+				"is_chunk":     true,
+			},
+		})
+	}
+
+	if len(points) == 0 {
+		return nil
+	}
+
+	if err := s.vectorDB.Upsert(ctx, s.collectionName, points); err != nil {
+		return fmt.Errorf("upsert chunks: %w", err)
 	}
 
 	return nil
@@ -135,13 +210,49 @@ func (s *RAGService) IndexMessages(ctx context.Context, messages []MessageVector
 
 	log.Printf("Indexing %d messages to vector DB...", len(messages))
 
-	points := make([]vectordb.Point, 0, len(messages))
+	points := make([]vectordb.Point, 0, len(messages)*2) // 预留分块空间
+	totalChunks := 0
+
 	for _, msg := range messages {
 		// 跳过空内容
 		if strings.TrimSpace(msg.Content) == "" {
 			continue
 		}
 
+		// 如果启用分块且文本需要分块
+		if s.enableChunking && s.chunker != nil && s.chunker.ShouldChunk(msg.Content) {
+			chunks := s.chunker.ChunkMessage(msg)
+			if len(chunks) > 1 {
+				totalChunks += len(chunks)
+				for _, chunk := range chunks {
+					vector, err := s.embeddingClient.GetEmbedding(ctx, chunk.Content)
+					if err != nil {
+						log.Printf("Failed to get embedding for chunk %s: %v", chunk.ID, err)
+						continue
+					}
+					points = append(points, vectordb.Point{
+						ID:     messageIDToUUID(chunk.ID),
+						Vector: vector,
+						Payload: map[string]interface{}{
+							"message_id":   msg.MessageID,
+							"chunk_id":     chunk.ID,
+							"chunk_index":  chunk.ChunkIndex,
+							"total_chunks": chunk.TotalChunks,
+							"chat_id":      msg.ChatID,
+							"chat_name":    msg.ChatName,
+							"sender_id":    msg.SenderID,
+							"sender_name":  msg.SenderName,
+							"content":      chunk.Content,
+							"created_at":   msg.CreatedAt.Format(time.RFC3339),
+							"is_chunk":     true,
+						},
+					})
+				}
+				continue
+			}
+		}
+
+		// 不需要分块，直接索引
 		vector, err := s.embeddingClient.GetEmbedding(ctx, msg.Content)
 		if err != nil {
 			log.Printf("Failed to get embedding for message %s: %v", msg.MessageID, err)
@@ -159,6 +270,7 @@ func (s *RAGService) IndexMessages(ctx context.Context, messages []MessageVector
 				"sender_name": msg.SenderName,
 				"content":     msg.Content,
 				"created_at":  msg.CreatedAt.Format(time.RFC3339),
+				"is_chunk":    false,
 			},
 		})
 	}
@@ -171,7 +283,11 @@ func (s *RAGService) IndexMessages(ctx context.Context, messages []MessageVector
 		return fmt.Errorf("batch upsert: %w", err)
 	}
 
-	log.Printf("Indexed %d messages to vector DB", len(points))
+	if totalChunks > 0 {
+		log.Printf("Indexed %d vectors (%d from chunking) to vector DB", len(points), totalChunks)
+	} else {
+		log.Printf("Indexed %d messages to vector DB", len(points))
+	}
 	return nil
 }
 
@@ -411,7 +527,13 @@ func (s *RAGService) HybridSearch(ctx context.Context, query string, keywords []
 	// 5. 对结果进行关键词加权融合
 	fusedResults := s.fuseResults(semanticResults, expandedKeywords, opts.SemanticWeight, opts.KeywordWeight)
 
-	// 6. 截取 top-N
+	// 6. 重排序（如果启用）
+	if s.enableRerank && s.reranker != nil && len(fusedResults) > 1 {
+		fusedResults = s.reranker.Rerank(ctx, query, expandedKeywords, fusedResults)
+		log.Printf("[RAG] Reranked %d results", len(fusedResults))
+	}
+
+	// 7. 截取 top-N
 	if len(fusedResults) > actualLimit {
 		fusedResults = fusedResults[:actualLimit]
 	}
@@ -525,12 +647,18 @@ func (s *RAGService) fuseResults(semanticResults []SearchResult, keywords []stri
 	return results
 }
 
-// calculateKeywordScore 计算关键词匹配分数
+// calculateKeywordScore 计算关键词匹配分数（使用 BM25 算法）
 func (s *RAGService) calculateKeywordScore(content string, keywords []string) float32 {
 	if len(keywords) == 0 {
 		return 0
 	}
 
+	// 使用 BM25 评分器
+	if s.bm25Scorer != nil {
+		return s.bm25Scorer.Score(content, keywords)
+	}
+
+	// Fallback: 简单匹配（向后兼容）
 	lowerContent := strings.ToLower(content)
 	matchCount := 0
 
@@ -542,6 +670,37 @@ func (s *RAGService) calculateKeywordScore(content string, keywords []string) fl
 
 	// 归一化到 0-1
 	return float32(matchCount) / float32(len(keywords))
+}
+
+// UpdateBM25Stats 更新 BM25 统计量
+// 应在批量索引后或定期调用此方法
+func (s *RAGService) UpdateBM25Stats(docs []string) {
+	if s.bm25Scorer != nil && len(docs) > 0 {
+		s.bm25Scorer.UpdateStats(docs)
+		docCount, avgLen, vocabSize := s.bm25Scorer.GetStats()
+		log.Printf("[RAG] BM25 stats updated: docs=%d, avgLen=%.1f, vocab=%d", docCount, avgLen, vocabSize)
+	}
+}
+
+// UpdateBM25StatsFromResults 从搜索结果更新 BM25 统计量（懒加载）
+func (s *RAGService) UpdateBM25StatsFromResults(results []SearchResult) {
+	if s.bm25Scorer == nil || len(results) == 0 {
+		return
+	}
+
+	docs := make([]string, len(results))
+	for i, r := range results {
+		docs[i] = r.Content
+	}
+	s.bm25Scorer.UpdateStats(docs)
+}
+
+// GetBM25Stats 获取 BM25 统计信息
+func (s *RAGService) GetBM25Stats() (docCount int64, avgDocLen float64, vocabSize int) {
+	if s.bm25Scorer == nil {
+		return 0, 0, 0
+	}
+	return s.bm25Scorer.GetStats()
 }
 
 // HybridSearchWithContext 混合搜索并返回格式化上下文

@@ -210,3 +210,39 @@ func (c *QdrantClient) GetCollectionInfo(ctx context.Context, name string) (map[
 
 	return result, nil
 }
+
+// DeleteCollection 删除集合
+func (c *QdrantClient) DeleteCollection(ctx context.Context, name string) error {
+	req, err := http.NewRequestWithContext(ctx, "DELETE", fmt.Sprintf("%s/collections/%s", c.endpoint, name), nil)
+	if err != nil {
+		return err
+	}
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete collection failed: %s", string(respBody))
+	}
+
+	return nil
+}
+
+// RecreateCollection 删除并重新创建集合（用于模型升级）
+func (c *QdrantClient) RecreateCollection(ctx context.Context, name string, dimension int) error {
+	// 先删除
+	if err := c.DeleteCollection(ctx, name); err != nil {
+		return fmt.Errorf("delete collection: %w", err)
+	}
+
+	// 再创建
+	if err := c.CreateCollection(ctx, name, dimension); err != nil {
+		return fmt.Errorf("create collection: %w", err)
+	}
+
+	return nil
+}

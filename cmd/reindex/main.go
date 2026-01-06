@@ -33,6 +33,7 @@ func main() {
 	// 命令行参数
 	limit := flag.Int("limit", 0, "Max messages to index (0 = all)")
 	workers := flag.Int("workers", 5, "Number of concurrent workers")
+	recreate := flag.Bool("recreate", false, "Recreate collection (required when changing embedding model)")
 	flag.Parse()
 
 	// 加载配置
@@ -65,14 +66,28 @@ func main() {
 	defer db.Close()
 
 	// 初始化客户端
-	embClient := embedding.NewOllamaClient(cfg.VectorDB.OllamaEndpoint, cfg.VectorDB.EmbeddingModel)
+	dimension := cfg.VectorDB.EmbeddingDimension
+	if dimension <= 0 {
+		dimension = 768 // 默认维度
+	}
+
+	embClient := embedding.NewOllamaClientWithDimension(cfg.VectorDB.OllamaEndpoint, cfg.VectorDB.EmbeddingModel, dimension)
 	vectorClient := vectordb.NewQdrantClient(cfg.VectorDB.QdrantEndpoint)
 
 	ctx := context.Background()
 
-	// 确保集合存在
-	if err := vectorClient.CreateCollection(ctx, cfg.VectorDB.CollectionName, 768); err != nil {
-		log.Printf("Collection may already exist: %v", err)
+	// 重建或创建集合
+	if *recreate {
+		log.Printf("Recreating collection %s with dimension %d...", cfg.VectorDB.CollectionName, dimension)
+		if err := vectorClient.RecreateCollection(ctx, cfg.VectorDB.CollectionName, dimension); err != nil {
+			log.Fatalf("Failed to recreate collection: %v", err)
+		}
+		log.Printf("Collection recreated successfully")
+	} else {
+		// 确保集合存在
+		if err := vectorClient.CreateCollection(ctx, cfg.VectorDB.CollectionName, dimension); err != nil {
+			log.Printf("Collection may already exist: %v", err)
+		}
 	}
 
 	// 查询消息

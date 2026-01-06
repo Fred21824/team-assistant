@@ -62,8 +62,14 @@ build() {
 
     mkdir -p build
 
+    # 使用 homebrew 的 go 避免版本冲突
+    GO_CMD="go"
+    if [ -x "/opt/homebrew/bin/go" ]; then
+        GO_CMD="/opt/homebrew/bin/go"
+    fi
+
     # 编译主服务
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/team-assistant ./cmd/main.go
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $GO_CMD build -o build/team-assistant ./cmd/main.go
     if [ ! -f "build/team-assistant" ]; then
         log_error "编译主服务失败"
         exit 1
@@ -71,7 +77,7 @@ build() {
     log_info "编译完成: build/team-assistant ($(du -h build/team-assistant | cut -f1))"
 
     # 编译 syncworker
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/syncworker ./cmd/syncworker/main.go
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $GO_CMD build -o build/syncworker ./cmd/syncworker/main.go
     if [ ! -f "build/syncworker" ]; then
         log_error "编译 syncworker 失败"
         exit 1
@@ -79,7 +85,7 @@ build() {
     log_info "编译完成: build/syncworker ($(du -h build/syncworker | cut -f1))"
 
     # 编译 reindex
-    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/reindex ./cmd/reindex/main.go
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $GO_CMD build -o build/reindex ./cmd/reindex/main.go
     if [ ! -f "build/reindex" ]; then
         log_error "编译 reindex 失败"
         exit 1

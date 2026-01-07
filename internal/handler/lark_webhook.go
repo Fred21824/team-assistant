@@ -275,6 +275,12 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 		return
 	}
 
+	// 检查群聊用户白名单权限
+	if !h.checkGroupChatUserPermission(&event) {
+		safeGo(func() { h.replyNoGroupChatUserPermission(&event) })
+		return
+	}
+
 	// 检查群聊成员数权限
 	if !h.checkGroupPermission(&event) {
 		safeGo(func() { h.replyNoGroupPermission(&event) })
@@ -865,6 +871,48 @@ func (h *LarkWebhookHandler) replyNoGroupPermission(event *lark.MessageReceiveEv
 	reply := fmt.Sprintf("抱歉，机器人仅在成员数 >= %d 人的群聊中提供服务。", minMembers)
 	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, event.Message.MessageID, "text", reply); err != nil {
 		log.Printf("Failed to reply no permission: %v", err)
+	}
+}
+
+// checkGroupChatUserPermission 检查用户是否有群聊 @机器人 的权限
+func (h *LarkWebhookHandler) checkGroupChatUserPermission(event *lark.MessageReceiveEvent) bool {
+	// 如果没有配置群聊白名单，默认允许所有用户
+	allowedUsers := h.svcCtx.Config.Permissions.GroupChatAllowedUsers
+	if len(allowedUsers) == 0 {
+		return true
+	}
+
+	senderOpenID := event.Sender.SenderID.OpenID
+
+	// 检查 OpenID 或用户名是否在白名单中
+	for _, allowed := range allowedUsers {
+		// 直接匹配 OpenID
+		if strings.EqualFold(allowed, senderOpenID) {
+			return true
+		}
+	}
+
+	// 获取用户名并检查
+	ctx := context.Background()
+	userName := h.GetUserName(ctx, event.Message.ChatID, senderOpenID)
+	if userName != "" {
+		for _, allowed := range allowedUsers {
+			if strings.EqualFold(allowed, userName) {
+				return true
+			}
+		}
+	}
+
+	log.Printf("User %s (%s) not in group chat whitelist, permission denied", userName, senderOpenID)
+	return false
+}
+
+// replyNoGroupChatUserPermission 回复无群聊权限
+func (h *LarkWebhookHandler) replyNoGroupChatUserPermission(event *lark.MessageReceiveEvent) {
+	ctx := context.Background()
+	reply := "抱歉，您没有在群聊中使用机器人的权限。"
+	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, event.Message.MessageID, "text", reply); err != nil {
+		log.Printf("Failed to reply no group chat user permission: %v", err)
 	}
 }
 

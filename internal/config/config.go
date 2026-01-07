@@ -124,6 +124,8 @@ type AutoSyncChatConfig struct {
 type PermissionsConfig struct {
 	// 私聊白名单：只有这些用户可以使用私聊功能（用户名列表，不区分大小写）
 	PrivateChatAllowedUsers []string `yaml:"PrivateChatAllowedUsers"`
+	// 群聊白名单：只有这些用户可以在群聊中 @机器人（为空则不限制）
+	GroupChatAllowedUsers []string `yaml:"GroupChatAllowedUsers"`
 	// 群聊最小成员数：只有成员数 >= 此值的群才能使用机器人
 	GroupMinMembers int `yaml:"GroupMinMembers"`
 }

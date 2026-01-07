@@ -453,7 +453,7 @@ func (h *LarkWebhookHandler) handlePrivateCommand(event *lark.MessageReceiveEven
 
 	log.Printf("Processing private command from %s: %s", senderOpenID, content)
 
-	// 命令匹配
+	// 命令匹配（注意：精确匹配要放在前缀匹配之前）
 	switch {
 	case content == "帮助" || content == "help" || content == "菜单":
 		h.replyPrivateHelp(ctx, messageID)
@@ -461,11 +461,11 @@ func (h *LarkWebhookHandler) handlePrivateCommand(event *lark.MessageReceiveEven
 	case content == "列出群聊" || content == "群列表" || content == "我的群":
 		h.listChats(ctx, messageID)
 
+	case content == "同步状态" || content == "任务状态" || content == "同步进度":
+		h.showSyncStatus(ctx, messageID, senderOpenID)
+
 	case strings.HasPrefix(content, "同步") || strings.HasPrefix(content, "下载"):
 		h.handleSyncCommand(ctx, messageID, senderOpenID, content)
-
-	case content == "同步状态" || content == "任务状态":
-		h.showSyncStatus(ctx, messageID, senderOpenID)
 
 	default:
 		// 尝试作为群名匹配
@@ -870,7 +870,7 @@ func (h *LarkWebhookHandler) replyNoGroupPermission(event *lark.MessageReceiveEv
 
 // showSyncStatus 显示同步状态
 func (h *LarkWebhookHandler) showSyncStatus(ctx context.Context, messageID, senderOpenID string) {
-	tasks, err := h.svcCtx.SyncTaskModel.GetRecentTasks(ctx, 5)
+	tasks, err := h.svcCtx.SyncTaskModel.GetRecentTasks(ctx, 10)
 	if err != nil {
 		log.Printf("Failed to get sync tasks: %v", err)
 		h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", "获取任务状态失败")
@@ -883,25 +883,72 @@ func (h *LarkWebhookHandler) showSyncStatus(ctx context.Context, messageID, send
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📊 **最近同步任务**\n\n")
+	sb.WriteString("📊 **同步任务状态**\n\n")
+
+	// 先显示进行中的任务
+	hasRunning := false
 	for _, task := range tasks {
+		if task.Status != "running" && task.Status != "pending" {
+			continue
+		}
+		hasRunning = true
 		chatName := task.ChatID
 		if task.ChatName.Valid {
 			chatName = task.ChatName.String
 		}
-		status := task.Status
-		switch status {
-		case "pending":
-			status = "⏳ 等待中"
-		case "running":
+		status := "⏳ 等待中"
+		if task.Status == "running" {
 			status = "🔄 同步中"
-		case "completed":
-			status = "✅ 已完成"
-		case "failed":
-			status = "❌ 失败"
 		}
-		sb.WriteString(fmt.Sprintf("• %s\n  状态: %s | 已同步: %d 条\n\n",
-			chatName, status, task.SyncedMessages))
+
+		sb.WriteString(fmt.Sprintf("**%s**\n", chatName))
+		sb.WriteString(fmt.Sprintf("  状态: %s\n", status))
+		sb.WriteString(fmt.Sprintf("  已同步: %d 条消息\n", task.SyncedMessages))
+
+		// 显示更新时间
+		if !task.UpdatedAt.IsZero() {
+			elapsed := time.Since(task.UpdatedAt)
+			if elapsed < time.Minute {
+				sb.WriteString(fmt.Sprintf("  更新: %d秒前\n", int(elapsed.Seconds())))
+			} else if elapsed < time.Hour {
+				sb.WriteString(fmt.Sprintf("  更新: %d分钟前\n", int(elapsed.Minutes())))
+			} else {
+				sb.WriteString(fmt.Sprintf("  更新: %s\n", task.UpdatedAt.Format("15:04:05")))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	// 再显示最近完成的任务
+	completedCount := 0
+	for _, task := range tasks {
+		if task.Status != "completed" && task.Status != "failed" {
+			continue
+		}
+		if completedCount == 0 {
+			if hasRunning {
+				sb.WriteString("---\n**历史任务：**\n")
+			}
+		}
+		completedCount++
+		if completedCount > 5 {
+			break
+		}
+
+		chatName := task.ChatID
+		if task.ChatName.Valid {
+			chatName = task.ChatName.String
+		}
+		status := "✅"
+		if task.Status == "failed" {
+			status = "❌"
+		}
+
+		sb.WriteString(fmt.Sprintf("• %s %s (%d条)\n", status, chatName, task.SyncedMessages))
+	}
+
+	if !hasRunning && completedCount == 0 {
+		sb.WriteString("暂无进行中或已完成的任务")
 	}
 
 	if err := h.svcCtx.LarkClient.ReplyMessage(ctx, messageID, "text", sb.String()); err != nil {

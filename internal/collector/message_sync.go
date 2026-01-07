@@ -27,6 +27,10 @@ type MessageSyncer struct {
 	running   bool
 	mu        sync.Mutex
 
+	// 消息转换器和索引器
+	converter *service.MessageConverter
+	indexer   *service.MessageIndexer
+
 	// 用户名缓存 (open_id -> name)
 	userCache   map[string]string
 	userCacheMu sync.RWMutex
@@ -34,10 +38,18 @@ type MessageSyncer struct {
 
 // NewMessageSyncer 创建消息同步器
 func NewMessageSyncer(svcCtx *svc.ServiceContext) *MessageSyncer {
+	// 创建索引器
+	var indexer *service.MessageIndexer
+	if svcCtx.Services != nil && svcCtx.Services.RAG != nil {
+		indexer = service.NewMessageIndexer(svcCtx.Services.RAG)
+	}
+
 	return &MessageSyncer{
 		svcCtx:    svcCtx,
 		batchSize: 50, // 飞书API限制最大50条/次
 		stopChan:  make(chan struct{}),
+		converter: service.NewMessageConverter(),
+		indexer:   indexer,
 		userCache: make(map[string]string),
 	}
 }
@@ -233,8 +245,9 @@ func (s *MessageSyncer) preloadChatMembers(ctx context.Context, chatID string) {
 	log.Printf("Preloaded %d member names for chat %s", len(members), chatID)
 }
 
-// getUserName 获取用户名（带缓存）
-func (s *MessageSyncer) getUserName(ctx context.Context, openID string) string {
+// GetUserName 获取用户名（带缓存），实现 service.UserNameFetcher 接口
+// 注意：chatID 参数在此实现中未使用，因为已通过 preloadChatMembers 预加载
+func (s *MessageSyncer) GetUserName(ctx context.Context, chatID, openID string) string {
 	if openID == "" {
 		return ""
 	}
@@ -260,58 +273,19 @@ func (s *MessageSyncer) getUserName(ctx context.Context, openID string) string {
 
 // ConvertToMessage 转换消息格式（公开方法，供外部调用）
 func (s *MessageSyncer) ConvertToMessage(ctx context.Context, item *lark.MessageItem) *model.ChatMessage {
-	// 解析时间戳（飞书返回的是毫秒时间戳）
-	var createTime time.Time
-	var createTimeTs int64
-	if ts, err := strconv.ParseInt(item.CreateTime, 10, 64); err == nil {
-		createTimeTs = ts
-		createTime = time.UnixMilli(ts)
-	} else {
-		createTimeTs = time.Now().UnixMilli()
-		createTime = time.Now()
-	}
+	// 使用适配器创建统一格式
+	raw := service.FromMessageItem(item)
 
-	// 解析消息内容
-	var content string
-	if item.MsgType == "image" {
-		// 处理图片消息：下载并分析（需要 messageID 来下载资源）
-		content = s.analyzeImageMessage(ctx, item.MessageID, item.Body.Content)
-	} else {
-		content = lark.ParseMessageContent(item.MsgType, item.Body.Content)
-	}
+	// 使用转换器（带选项）
+	return s.converter.Convert(ctx, raw,
+		service.WithImageAnalysis(s),
+		service.WithUserNameFetcher(s),
+	)
+}
 
-	// 替换 @_user_N 为真实用户名
-	for _, mention := range item.Mentions {
-		if mention.Key != "" && mention.Name != "" {
-			content = strings.ReplaceAll(content, mention.Key, "@"+mention.Name)
-		}
-	}
-
-	// 序列化 mentions
-	mentionsJSON, _ := json.Marshal(item.Mentions)
-
-	// 获取发送者名称
-	senderName := s.getUserName(ctx, item.Sender.ID)
-	if senderName != "" {
-		log.Printf("Got sender name: %s -> %s", item.Sender.ID, senderName)
-	}
-
-	return &model.ChatMessage{
-		MessageID:   item.MessageID,
-		ChatID:      item.ChatID,
-		SenderID:    sql.NullString{String: item.Sender.ID, Valid: item.Sender.ID != ""},
-		SenderName:  sql.NullString{String: senderName, Valid: senderName != ""},
-		MsgType:     sql.NullString{String: item.MsgType, Valid: true},
-		Content:     sql.NullString{String: content, Valid: content != ""},
-		RawContent:  sql.NullString{String: item.Body.Content, Valid: item.Body.Content != ""},
-		Mentions:    mentionsJSON,
-		ReplyToID:   sql.NullString{String: item.ParentID, Valid: item.ParentID != ""},
-		ThreadID:    sql.NullString{String: item.ThreadID, Valid: item.ThreadID != ""},
-		RootID:      sql.NullString{String: item.RootID, Valid: item.RootID != ""},
-		IsAtBot:     0,
-		CreatedAt:   createTime,
-		CreatedAtTs: sql.NullInt64{Int64: createTimeTs, Valid: true},
-	}
+// AnalyzeImage 实现 service.ImageAnalyzer 接口
+func (s *MessageSyncer) AnalyzeImage(ctx context.Context, messageID, rawContent string) string {
+	return s.analyzeImageMessage(ctx, messageID, rawContent)
 }
 
 // analyzeImageMessage 分析图片消息

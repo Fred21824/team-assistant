@@ -287,15 +287,23 @@ func (p *SyncPool) claimTask(ctx context.Context) (*model.MessageSyncTask, error
 type AutoSyncScheduler struct {
 	svcCtx   *svc.ServiceContext
 	chats    []config.AutoSyncChatConfig
+	indexer  *service.MessageIndexer
 	stopChan chan struct{}
 	wg       sync.WaitGroup
 }
 
 // NewAutoSyncScheduler 创建定时增量同步调度器
 func NewAutoSyncScheduler(svcCtx *svc.ServiceContext, chats []config.AutoSyncChatConfig) *AutoSyncScheduler {
+	// 创建索引器
+	var indexer *service.MessageIndexer
+	if svcCtx.Services != nil && svcCtx.Services.RAG != nil {
+		indexer = service.NewMessageIndexer(svcCtx.Services.RAG)
+	}
+
 	return &AutoSyncScheduler{
 		svcCtx:   svcCtx,
 		chats:    chats,
+		indexer:  indexer,
 		stopChan: make(chan struct{}),
 	}
 }
@@ -408,8 +416,7 @@ func (s *AutoSyncScheduler) syncChatIncremental(cfg config.AutoSyncChatConfig, c
 // processMessages 处理消息列表，返回新增消息数
 func (s *AutoSyncScheduler) processMessages(ctx context.Context, syncer *collector.MessageSyncer, items []*lark.MessageItem, chatID, chatName string) int {
 	newCount := 0
-
-	var vectorMsgs []service.MessageVector
+	var convertedMsgs []*model.ChatMessage
 
 	for _, item := range items {
 		if item.Deleted {
@@ -435,26 +442,12 @@ func (s *AutoSyncScheduler) processMessages(ctx context.Context, syncer *collect
 		}
 
 		newCount++
-
-		// 收集向量数据
-		if msg.Content.Valid && msg.Content.String != "" {
-			vectorMsgs = append(vectorMsgs, service.MessageVector{
-				MessageID:  msg.MessageID,
-				ChatID:     msg.ChatID,
-				ChatName:   chatName,
-				SenderID:   msg.SenderID.String,
-				SenderName: msg.SenderName.String,
-				Content:    msg.Content.String,
-				CreatedAt:  msg.CreatedAt,
-			})
-		}
+		convertedMsgs = append(convertedMsgs, msg)
 	}
 
 	// 批量索引到向量数据库
-	if len(vectorMsgs) > 0 && s.svcCtx.Services.RAG != nil && s.svcCtx.Services.RAG.IsEnabled() {
-		if err := s.svcCtx.Services.RAG.IndexMessages(ctx, vectorMsgs); err != nil {
-			log.Printf("AutoSync: failed to index messages: %v", err)
-		}
+	if len(convertedMsgs) > 0 && s.indexer != nil {
+		s.indexer.IndexMessages(ctx, convertedMsgs, chatName)
 	}
 
 	return newCount

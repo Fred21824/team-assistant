@@ -2,19 +2,16 @@ package handler
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"team-assistant/internal/logic/ai"
-	"team-assistant/internal/model"
 	"team-assistant/internal/service"
 	"team-assistant/internal/svc"
 	"team-assistant/pkg/lark"
@@ -45,6 +42,9 @@ type LarkWebhookHandler struct {
 	svcCtx    *svc.ServiceContext
 	processor *ai.HybridProcessor
 	msgSyncer MessageSyncer
+	// 消息转换器和索引器
+	converter *service.MessageConverter
+	indexer   *service.MessageIndexer
 	// 用户名缓存 (chatID -> (openID -> name))
 	userCache   map[string]map[string]string
 	userCacheMu sync.RWMutex
@@ -55,9 +55,17 @@ type LarkWebhookHandler struct {
 
 // NewLarkWebhookHandler 创建飞书Webhook处理器
 func NewLarkWebhookHandler(svcCtx *svc.ServiceContext) *LarkWebhookHandler {
+	// 创建索引器
+	var indexer *service.MessageIndexer
+	if svcCtx.Services != nil && svcCtx.Services.RAG != nil {
+		indexer = service.NewMessageIndexer(svcCtx.Services.RAG)
+	}
+
 	h := &LarkWebhookHandler{
 		svcCtx:     svcCtx,
 		processor:  ai.NewHybridProcessor(svcCtx),
+		converter:  service.NewMessageConverter(),
+		indexer:    indexer,
 		userCache:  make(map[string]map[string]string),
 		imageCache: make(map[string]*ImageContext),
 	}
@@ -293,8 +301,8 @@ func (h *LarkWebhookHandler) handleMessageReceive(eventData json.RawMessage) {
 	safeGo(func() { h.processQuery(event.Message.ChatID, event.Message.MessageID, event.Message.RootID, content) })
 }
 
-// getUserName 获取用户名（带缓存）
-func (h *LarkWebhookHandler) getUserName(ctx context.Context, chatID, openID string) string {
+// GetUserName 获取用户名（带缓存），实现 service.UserNameFetcher 接口
+func (h *LarkWebhookHandler) GetUserName(ctx context.Context, chatID, openID string) string {
 	if openID == "" {
 		return ""
 	}
@@ -340,85 +348,38 @@ func (h *LarkWebhookHandler) storeMessage(event *lark.MessageReceiveEvent, conte
 
 	ctx := context.Background()
 
-	// 解析发送时间（飞书返回的是毫秒时间戳）
-	var sendTime time.Time
-	var sendTimeTs int64
-	if ts, err := strconv.ParseInt(event.Message.CreateTime, 10, 64); err == nil {
-		sendTimeTs = ts
-		sendTime = time.UnixMilli(ts)
-	} else {
-		sendTimeTs = time.Now().UnixMilli()
-		sendTime = time.Now()
-	}
+	// 使用适配器创建统一格式
+	raw := service.FromWebhookEvent(event)
 
-	// 替换 @_user_N 为真实用户名
-	for _, mention := range event.Message.Mentions {
-		if mention.Key != "" && mention.Name != "" {
-			content = strings.ReplaceAll(content, mention.Key, "@"+mention.Name)
-		}
-	}
+	// 使用转换器（带选项）
+	msg := h.converter.Convert(ctx, raw,
+		service.WithAtBotDetection(h.svcCtx.Config.Lark.BotOpenID),
+		service.WithUserNameFetcher(h),
+	)
 
-	// 序列化 mentions
-	mentionsJSON, _ := json.Marshal(event.Message.Mentions)
-
-	// 检查是否@机器人
-	isAtBot := 0
-	if lark.IsAtBot(event, h.svcCtx.Config.Lark.BotOpenID) {
-		isAtBot = 1
-	}
-
-	// 获取发送者名称
-	senderName := h.getUserName(ctx, event.Message.ChatID, event.Sender.SenderID.OpenID)
-
-	msg := &model.ChatMessage{
-		MessageID:   event.Message.MessageID,
-		ChatID:      event.Message.ChatID,
-		SenderID:    sql.NullString{String: event.Sender.SenderID.OpenID, Valid: true},
-		SenderName:  sql.NullString{String: senderName, Valid: senderName != ""},
-		MsgType:     sql.NullString{String: event.Message.MessageType, Valid: true},
-		Content:     sql.NullString{String: content, Valid: true},
-		RawContent:  sql.NullString{String: event.Message.Content, Valid: true},
-		Mentions:    mentionsJSON,
-		ReplyToID:   sql.NullString{String: event.Message.ParentID, Valid: event.Message.ParentID != ""},
-		RootID:      sql.NullString{String: event.Message.RootID, Valid: event.Message.RootID != ""},
-		IsAtBot:     isAtBot,
-		CreatedAt:   sendTime,
-		CreatedAtTs: sql.NullInt64{Int64: sendTimeTs, Valid: true},
-	}
-
+	// 存储到数据库
 	if err := h.svcCtx.MessageModel.Insert(ctx, msg); err != nil {
 		log.Printf("Failed to store message: %v", err)
-	} else {
-		log.Printf("Stored message: %s from %s (%s)", event.Message.MessageID, senderName, event.Sender.SenderID.OpenID)
+		return
+	}
 
-		// 同时索引到向量数据库（用于 RAG 语义搜索）
-		if h.svcCtx.Services != nil && h.svcCtx.Services.RAG != nil && h.svcCtx.Services.RAG.IsEnabled() {
-			// 获取群名称
-			chatName := ""
-			if group, err := h.svcCtx.GroupModel.FindByChatID(ctx, event.Message.ChatID); err == nil && group != nil {
-				if group.ChatName.Valid {
-					chatName = group.ChatName.String
-				}
-			}
+	log.Printf("Stored message: %s from %s (%s)", event.Message.MessageID, msg.SenderName.String, event.Sender.SenderID.OpenID)
 
-			vectorMsg := service.MessageVector{
-				MessageID:  event.Message.MessageID,
-				ChatID:     event.Message.ChatID,
-				ChatName:   chatName,
-				SenderID:   event.Sender.SenderID.OpenID,
-				SenderName: senderName,
-				Content:    content,
-				CreatedAt:  sendTime,
-			}
-			if err := h.svcCtx.Services.RAG.IndexMessage(ctx, vectorMsg); err != nil {
-				log.Printf("Failed to index message to vector DB: %v", err)
-			} else {
-				log.Printf("Indexed message to vector DB: %s", event.Message.MessageID)
-			}
-		} else {
-			log.Printf("RAG service not available, skipping vector indexing")
+	// 索引到向量数据库
+	if h.indexer != nil {
+		chatName := h.getChatName(ctx, event.Message.ChatID)
+		h.indexer.IndexMessage(ctx, msg, chatName)
+	}
+}
+
+// getChatName 获取群名称
+func (h *LarkWebhookHandler) getChatName(ctx context.Context, chatID string) string {
+	if group, err := h.svcCtx.GroupModel.FindByChatID(ctx, chatID); err == nil && group != nil {
+		if group.ChatName.Valid {
+			return group.ChatName.String
 		}
 	}
+	return ""
 }
 
 // processQuery 处理用户查询
